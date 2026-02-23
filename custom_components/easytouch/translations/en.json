@@ -1,0 +1,63 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Select EasyTouch thermostat",
+        "data": {
+          "address": "Bluetooth MAC address"
+        }
+      },
+      "confirm": {
+        "title": "Configure EasyTouch thermostat",
+        "description": "Set up **{name}**.\n\nLeave the password blank if your thermostat has no password set.",
+        "data": {
+          "password": "Password"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This device is already configured.",
+      "no_devices_found": "No EasyTouch thermostats found nearby."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "connected": {
+        "name": "Connected"
+      },
+      "authenticated": {
+        "name": "Authenticated"
+      },
+      "data_healthy": {
+        "name": "Data Healthy"
+      }
+    },
+    "button": {
+      "reboot": {
+        "name": "Reboot"
+      }
+    },
+    "climate": {
+      "zone": {
+        "name": "Climate"
+      }
+    },
+    "sensor": {
+      "serial_number": {
+        "name": "Serial Number"
+      },
+      "firmware_version": {
+        "name": "Firmware Version"
+      },
+      "model_number": {
+        "name": "Model Number"
+      },
+      "device_type": {
+        "name": "Device Type"
+      },
+      "config_index": {
+        "name": "Config Index"
+      }
+    }
+  }
+}
