@@ -7,7 +7,7 @@ from typing import Any
 
 from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_ADDRESS
+from homeassistant.const import CONF_ADDRESS, EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -26,7 +26,7 @@ SENSOR_DESCRIPTIONS: tuple[EasyTouchSensorDescription, ...] = (
     EasyTouchSensorDescription(
         key="serial_number",
         translation_key="serial_number",
-        entity_category="diagnostic",
+        entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=True,
         icon="mdi:identifier",
         value_fn=lambda c: c.serial_number,
@@ -34,7 +34,7 @@ SENSOR_DESCRIPTIONS: tuple[EasyTouchSensorDescription, ...] = (
     EasyTouchSensorDescription(
         key="firmware_version",
         translation_key="firmware_version",
-        entity_category="diagnostic",
+        entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=True,
         icon="mdi:chip",
         value_fn=lambda c: c.firmware_version,
@@ -42,7 +42,7 @@ SENSOR_DESCRIPTIONS: tuple[EasyTouchSensorDescription, ...] = (
     EasyTouchSensorDescription(
         key="model_number",
         translation_key="model_number",
-        entity_category="diagnostic",
+        entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=True,
         icon="mdi:barcode",
         value_fn=lambda c: c.device_model,
@@ -50,7 +50,7 @@ SENSOR_DESCRIPTIONS: tuple[EasyTouchSensorDescription, ...] = (
     EasyTouchSensorDescription(
         key="device_type",
         translation_key="device_type",
-        entity_category="diagnostic",
+        entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=True,
         icon="mdi:thermostat",
         value_fn=lambda c: c.device_type,
@@ -58,7 +58,7 @@ SENSOR_DESCRIPTIONS: tuple[EasyTouchSensorDescription, ...] = (
     EasyTouchSensorDescription(
         key="config_index",
         translation_key="config_index",
-        entity_category="diagnostic",
+        entity_category=EntityCategory.DIAGNOSTIC,
         entity_registry_enabled_default=True,
         icon="mdi:cog",
         value_fn=lambda c: c.config_index,

@@ -20,7 +20,7 @@ import logging
 import time
 from typing import Any, Callable
 
-from bleak import BleakClient, BleakGATTCharacteristic
+from bleak import BleakClient
 from bleak.exc import BleakError
 from bleak_retry_connector import establish_connection
 from homeassistant.components import bluetooth
@@ -153,6 +153,8 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
         self._reconnect_task: asyncio.Task | None = None
         self._consecutive_failures: int = 0
         self._last_data_time: float = 0.0
+        # Track when auth last succeeded to detect expected post-auth disconnect
+        self._last_auth_time: float = 0.0
 
     # ──────────────────────────────────────────────────────────────────────────
     # Public helpers
@@ -335,8 +337,10 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
         if not self._client or not self._connected:
             _LOGGER.warning("Cannot write JSON: not connected")
             return
-        delays = [0.1, 0.4, 0.6]
-        await asyncio.sleep(delays[attempt] if attempt < len(delays) else 0.6)
+        # No delay on first attempt — device expects prompt follow-up after auth.
+        # Retry attempts use increasing delays for reliability.
+        delays = [0.0, 0.2, 0.4]
+        await asyncio.sleep(delays[attempt] if attempt < len(delays) else 0.4)
         try:
             data = payload.encode("utf-8")
             await self._client.write_gatt_char(JSON_CMD_UUID, data, response=True)
@@ -421,12 +425,10 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
         # Brief settle
         await asyncio.sleep(AUTH_STEP_DELAY_S)
 
-        # Enable notifications on JSON_RET (FF01)
-        try:
-            await client.start_notify(JSON_RET_UUID, self._on_notify)
-            _LOGGER.debug("Notifications enabled on FF01")
-        except BleakError as exc:
-            _LOGGER.warning("Failed to enable notifications on FF01: %s — will use reads", exc)
+        # EasyTouch uses read-after-write pattern on FF01 (not notify).
+        # The characteristic does not have a CCCD descriptor; sending a CCCD
+        # write via start_notify causes the device to drop the connection, so
+        # we skip it entirely and drive all reads explicitly.
 
         # Try reading Device Information Service
         await self._read_device_info(client)
@@ -453,11 +455,13 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
                 if char is None:
                     continue
                 try:
-                    data = await client.read_gatt_char(uuid)
+                    data = await asyncio.wait_for(
+                        client.read_gatt_char(uuid), timeout=3.0
+                    )
                     value = data.decode("utf-8", errors="replace").strip()
                     setattr(self, attr, value)
                     _LOGGER.debug("Device info %s: %s", attr, value)
-                except BleakError:
+                except (BleakError, asyncio.TimeoutError):
                     pass
             if self.serial_number and len(self.serial_number) >= 3:
                 self.device_model = self.serial_number[:3]
@@ -471,6 +475,7 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
             await client.write_gatt_char(PASSWORD_CHAR_UUID, pw_bytes, response=True)
             _LOGGER.info("Password write succeeded — authenticated")
             self._authenticated = True
+            self._last_auth_time = time.monotonic()
             self._consecutive_failures = 0
             # Discover zone configs, then start polling
             self.hass.async_create_task(self._config_discovery())
@@ -483,14 +488,26 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
     # ──────────────────────────────────────────────────────────────────────────
 
     async def _config_discovery(self) -> None:
-        """Request Get Config for zones 0-3 (300 ms apart), then start polling."""
+        """Request Get Config for zones 0-3, read response after each write, then start polling."""
         _LOGGER.info("Starting zone config discovery...")
         for zone in range(4):
             if not self._connected:
-                break
+                _LOGGER.debug("Disconnected during config discovery at zone %d", zone)
+                return
             await self._request_config(zone)
-            # Wait for response + gap before next zone
-            await asyncio.sleep(CONFIG_ZONE_DELAY_S + 0.5)
+            # Read response explicitly (matching Android's readJsonResponse after writeJsonCommand)
+            await asyncio.sleep(READ_RESPONSE_DELAY_S)
+            if self._client and self._connected:
+                try:
+                    data = await asyncio.wait_for(
+                        self._client.read_gatt_char(JSON_RET_UUID), timeout=3.0
+                    )
+                    if data:
+                        self._accumulate(data.decode("utf-8", errors="replace"))
+                except (BleakError, asyncio.TimeoutError) as exc:
+                    _LOGGER.debug("Config read zone %d failed: %s", zone, exc)
+            # Gap before next zone (matching Android's 300ms CONFIG_ZONE_DELAY)
+            await asyncio.sleep(CONFIG_ZONE_DELAY_S)
 
         _LOGGER.info(
             "Config discovery done. Zones found: %s",
@@ -552,11 +569,6 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
     # ──────────────────────────────────────────────────────────────────────────
     # Notification + read data handler
     # ──────────────────────────────────────────────────────────────────────────
-
-    def _on_notify(self, _char: BleakGATTCharacteristic, data: bytearray) -> None:
-        chunk = bytes(data).decode("utf-8", errors="replace")
-        _LOGGER.debug("FF01 notify: %.100s", chunk)
-        self._accumulate(chunk)
 
     def _accumulate(self, chunk: str) -> None:
         """Accumulate JSON chunks and process when complete."""
@@ -726,23 +738,40 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
 
     @callback
     def _on_disconnect(self, _client: BleakClient) -> None:
-        _LOGGER.warning("EasyTouch %s disconnected", self.address)
+        # Detect expected post-auth disconnect: device-initiated reset shortly after
+        # password write succeeds (session establishment pattern, matches Android behavior)
+        time_since_auth = time.monotonic() - self._last_auth_time
+        post_auth = self._last_auth_time > 0 and time_since_auth < 10.0
+
+        if post_auth:
+            _LOGGER.info(
+                "EasyTouch %s post-auth disconnect (%.3fs after auth) — reconnecting quickly",
+                self.address, time_since_auth,
+            )
+            # Reset so a second post-auth disconnect uses normal backoff
+            self._last_auth_time = 0.0
+        else:
+            _LOGGER.warning("EasyTouch %s disconnected", self.address)
+
         self._stop_poll()
         self._connected = False
         self._authenticated = False
         self._config_done_event.clear()
-        self._schedule_reconnect()
+        self._schedule_reconnect(quick=post_auth)
         # Push unavailable state
         self.async_set_updated_data(None)
 
-    def _schedule_reconnect(self) -> None:
+    def _schedule_reconnect(self, quick: bool = False) -> None:
         if self._reconnect_task and not self._reconnect_task.done():
             return
-        delay = min(
-            RECONNECT_BACKOFF_BASE_S * (2 ** self._consecutive_failures),
-            RECONNECT_BACKOFF_CAP_S,
-        )
-        self._consecutive_failures += 1
+        if quick:
+            delay = 1.0
+        else:
+            delay = min(
+                RECONNECT_BACKOFF_BASE_S * (2 ** self._consecutive_failures),
+                RECONNECT_BACKOFF_CAP_S,
+            )
+            self._consecutive_failures += 1
         _LOGGER.info(
             "Scheduling reconnect in %.0fs (attempt %d)",
             delay, self._consecutive_failures,

@@ -27,10 +27,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
-    try:
-        await coordinator.async_connect()
-    except Exception:  # noqa: BLE001
-        _LOGGER.exception("Failed to connect to EasyTouch %s — will retry", coordinator.address)
+    # Connect in background — do not block HA startup; entities start unavailable
+    hass.async_create_task(coordinator.async_connect())
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True

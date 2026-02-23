@@ -10,7 +10,7 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntityDescription,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_ADDRESS
+from homeassistant.const import CONF_ADDRESS, EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -18,7 +18,6 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import EasyTouchCoordinator
-from .models import ThermostatState
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -32,7 +31,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[EasyTouchBinarySensorDescription, ...] = (
         translation_key="connected",
         device_class=BinarySensorDeviceClass.CONNECTIVITY,
         entity_registry_enabled_default=True,
-        entity_category="diagnostic",
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda c: c.connected,
     ),
     EasyTouchBinarySensorDescription(
@@ -40,7 +39,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[EasyTouchBinarySensorDescription, ...] = (
         translation_key="authenticated",
         device_class=None,
         entity_registry_enabled_default=True,
-        entity_category="diagnostic",
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda c: c.authenticated,
     ),
     EasyTouchBinarySensorDescription(
@@ -48,7 +47,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[EasyTouchBinarySensorDescription, ...] = (
         translation_key="data_healthy",
         device_class=BinarySensorDeviceClass.PROBLEM,
         entity_registry_enabled_default=True,
-        entity_category="diagnostic",
+        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda c: not c.data_healthy,  # PROBLEM = True when unhealthy
     ),
 )
