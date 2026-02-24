@@ -149,6 +149,9 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
         # Per-zone debounce tasks (temperature and fan)
         self._debounce_tasks: dict[str, asyncio.Task] = {}
 
+        # Pending command to send on next poll session (queued by _send_change)
+        self._pending_command: str | None = None
+
         # Signals
         self._config_done_event = asyncio.Event()   # set when all zone configs received
         self._session_task: asyncio.Task | None = None  # next scheduled session
@@ -327,7 +330,10 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
 
         async def _run() -> None:
             await asyncio.sleep(delay)
-            await coro_factory()
+            try:
+                await coro_factory()
+            except Exception as exc:
+                _LOGGER.debug("Debounce task error (command queued anyway): %s", exc)
 
         self._debounce_tasks[key] = self.entry.async_create_background_task(
             self.hass, _run(), f"easytouch_debounce_{key}"
@@ -340,7 +346,12 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
     async def _send_change(self, changes: dict) -> None:
         # Compact JSON (no spaces) matches Android JSONObject.toString() output
         payload = json.dumps({"Type": "Change", "Changes": changes}, separators=(',', ':'))
-        await self._write_json(payload)
+        # Queue for the next session rather than writing directly. The device
+        # disconnects itself ~133ms after each EE01 write, so _connected is
+        # almost always False when user-triggered commands arrive. The queued
+        # payload replaces any Get Status write in the next _run_session call.
+        self._pending_command = payload
+        _LOGGER.debug("Command queued: %.100s", payload)
 
     async def _write_json(self, payload: str) -> None:
         # Write immediately after auth — device timer fires at ~133ms after password write,
@@ -546,6 +557,16 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
                         self._next_config_zone += 1
                     except BleakError as exc:
                         _LOGGER.debug("Get Config zone %d failed: %s", zone, exc)
+                elif self._pending_command:
+                    cmd = self._pending_command
+                    self._pending_command = None
+                    # Re-arm suppression at actual send time so the FF01 read
+                    # in the following session (Change Result) is also covered.
+                    self.suppress_status()
+                    try:
+                        await self._write_json(cmd)
+                    except BleakError as exc:
+                        _LOGGER.debug("Pending command write failed: %s", exc)
                 else:
                     try:
                         await self._request_status()
