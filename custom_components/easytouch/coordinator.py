@@ -329,7 +329,9 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
             await asyncio.sleep(delay)
             await coro_factory()
 
-        self._debounce_tasks[key] = self.hass.async_create_task(_run())
+        self._debounce_tasks[key] = self.entry.async_create_background_task(
+            self.hass, _run(), f"easytouch_debounce_{key}"
+        )
 
     # ──────────────────────────────────────────────────────────────────────────
     # BLE write helpers
@@ -446,8 +448,10 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
         await asyncio.sleep(AUTH_STEP_DELAY_S)
         await self._authenticate(client)
         # Schedule one session: read FF01 from prev write, write next command, disconnect.
-        # Runs as a background task so _finish_connect (and the connect lock) returns first.
-        self.hass.async_create_task(self._run_session())
+        # Use async_create_background_task so HA bootstrap does not wait for this task.
+        self.entry.async_create_background_task(
+            self.hass, self._run_session(), "easytouch_run_session"
+        )
 
     async def _read_device_info(self, client: BleakClient) -> None:
         """Read BLE 0x180A Device Information Service if present."""
@@ -573,8 +577,8 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
             )
             return
         _LOGGER.debug("Next session in %.0fs", delay)
-        self._session_task = self.hass.async_create_task(
-            self._session_with_delay(delay)
+        self._session_task = self.entry.async_create_background_task(
+            self.hass, self._session_with_delay(delay), "easytouch_session"
         )
 
     async def _session_with_delay(self, delay: float) -> None:
