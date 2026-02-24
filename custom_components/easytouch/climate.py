@@ -68,9 +68,14 @@ async def async_setup_entry(
 
     @callback
     def _check_new_zones() -> None:
+        # Only create entities for zones confirmed in the status response (Z_sts).
+        # Get Config may return data for zones 1-3 even on single-zone devices.
+        state = coordinator.thermostat_state
+        if state is None:
+            return
         new = [
             EasyTouchClimate(coordinator, entry, zone)
-            for zone in coordinator.zone_configs
+            for zone in state.available_zones
             if zone not in created_zones
         ]
         if new:

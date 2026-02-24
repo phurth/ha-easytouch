@@ -157,6 +157,8 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
         # Config-discovery state
         self._next_config_zone: int = 0   # next zone index to request (0-3)
         self._config_done: bool = False   # True once all zone configs gathered
+        # Set True before an intentional disconnect so _on_disconnect doesn't push None
+        self._expecting_disconnect: bool = False
 
     # ──────────────────────────────────────────────────────────────────────────
     # Public helpers
@@ -540,8 +542,10 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
                         _LOGGER.debug("Get Status failed: %s", exc)
 
         finally:
-            # Always explicitly disconnect after write (manos pattern)
+            # Always explicitly disconnect after write (manos pattern).
+            # Flag the disconnect as expected so _on_disconnect doesn't push None.
             if self._client:
+                self._expecting_disconnect = True
                 try:
                     await self._client.disconnect()
                 except Exception:
@@ -761,13 +765,16 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
 
     @callback
     def _on_disconnect(self, _client: BleakClient) -> None:
-        # Mark disconnected — _run_session.finally handles reconnect scheduling.
-        # If disconnect is unexpected (not from _run_session), the session task is
-        # already scheduled or _run_session will handle cleanup in its finally block.
-        _LOGGER.debug("EasyTouch %s disconnected", self.address)
         self._connected = False
         self._authenticated = False
-        self.async_set_updated_data(None)
+        if self._expecting_disconnect:
+            # Normal end-of-session disconnect — keep last good data visible in UI.
+            self._expecting_disconnect = False
+            _LOGGER.debug("EasyTouch %s disconnected (expected)", self.address)
+        else:
+            # Unexpected disconnect — push None so entities show unavailable.
+            _LOGGER.debug("EasyTouch %s disconnected (unexpected)", self.address)
+            self.async_set_updated_data(None)
 
     # ──────────────────────────────────────────────────────────────────────────
     # DataUpdateCoordinator hook (no-op: we push via async_set_updated_data)
