@@ -536,17 +536,21 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
                 _LOGGER.debug("Disconnected during config discovery at zone %d", zone)
                 return
             await self._request_config(zone)
-            # Read response after 50ms — matches Android's READ_DELAY_MS = 50
-            await asyncio.sleep(0.05)
+            # With response=False (Write Command), device processes the write and
+            # updates FF01 within ~15ms; it then disconnects ~32ms after the write.
+            # Use a short delay so the read is queued before the disconnect fires.
+            await asyncio.sleep(0.01)
             if self._client and self._connected:
                 try:
                     data = await asyncio.wait_for(
                         self._client.read_gatt_char(JSON_RET_UUID), timeout=3.0
                     )
                     if data:
-                        self._accumulate(data.decode("utf-8", errors="replace"))
+                        raw = data.decode("utf-8", errors="replace")
+                        _LOGGER.info("Config zone %d raw: %.200s", zone, raw)
+                        self._accumulate(raw)
                 except (BleakError, asyncio.TimeoutError) as exc:
-                    _LOGGER.debug("Config read zone %d failed: %s", zone, exc)
+                    _LOGGER.info("Config read zone %d failed: %s", zone, exc)
             # Gap before next zone (matching Android's 300ms CONFIG_ZONE_DELAY)
             await asyncio.sleep(CONFIG_ZONE_DELAY_S)
 
@@ -824,6 +828,16 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
         if quick:
             delay = 1.0
         else:
+            # After hitting the backoff cap several times, stop automatically
+            # retrying so we don't spin forever. User can reload the integration.
+            _MAX_FAILURES = 20
+            if self._consecutive_failures >= _MAX_FAILURES:
+                _LOGGER.error(
+                    "EasyTouch %s: giving up after %d failed reconnect attempts. "
+                    "Reload the integration to retry.",
+                    self.address, self._consecutive_failures,
+                )
+                return
             delay = min(
                 RECONNECT_BACKOFF_BASE_S * (2 ** self._consecutive_failures),
                 RECONNECT_BACKOFF_CAP_S,
@@ -861,11 +875,8 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
     # ──────────────────────────────────────────────────────────────────────────
 
     async def _async_update_data(self) -> ThermostatState | None:
-        if not self._connected:
-            try:
-                await self.async_connect()
-            except BleakError as exc:
-                _LOGGER.warning("Reconnect during update failed: %s", exc)
+        # Push-based: we drive the poll loop ourselves via async_set_updated_data.
+        # Never block here — reconnection is handled by the background reconnect task.
         return self.thermostat_state
 
     # ──────────────────────────────────────────────────────────────────────────
