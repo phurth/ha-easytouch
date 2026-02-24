@@ -348,11 +348,11 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
         await asyncio.sleep(delays[attempt] if attempt < len(delays) else 0.4)
         try:
             data = payload.encode("utf-8")
-            await self._client.write_gatt_char(JSON_CMD_UUID, data, response=True)
-            _LOGGER.debug("JSON write OK (attempt %d): %.100s", attempt + 1, payload)
+            await self._client.write_gatt_char(JSON_CMD_UUID, data, response=False)
+            _LOGGER.info("JSON write OK (attempt %d): %.100s", attempt + 1, payload)
         except BleakError as exc:
             if attempt < 2:
-                _LOGGER.debug("JSON write failed (attempt %d): %s — retrying", attempt + 1, exc)
+                _LOGGER.info("JSON write failed (attempt %d): %s — retrying", attempt + 1, exc)
                 await self._write_json(payload, attempt + 1)
             else:
                 _LOGGER.warning("JSON write failed after 3 attempts: %s", exc)
