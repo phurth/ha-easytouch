@@ -177,7 +177,9 @@ class EasyTouchClimate(CoordinatorEntity[EasyTouchCoordinator], ClimateEntity):
             ha_mode_str = "off"
         else:
             ha_mode_str = DEVICE_TO_HA_MODE.get(zs.mode_num, "off")
-        self._attr_hvac_mode = _HA_MODE.get(ha_mode_str, HVACMode.OFF)
+        new_hvac_mode = _HA_MODE.get(ha_mode_str, HVACMode.OFF)
+        hvac_mode_changing = new_hvac_mode != self._attr_hvac_mode
+        self._attr_hvac_mode = new_hvac_mode
 
         # Available HVAC modes from MAV bitmask
         avail_str = self.coordinator.get_available_hvac_modes(self.zone)
@@ -220,7 +222,15 @@ class EasyTouchClimate(CoordinatorEntity[EasyTouchCoordinator], ClimateEntity):
         avail_fan = self.coordinator.get_available_fan_modes(self.zone, zs.mode_num)
         self._attr_fan_modes = avail_fan if avail_fan else ["auto"]
 
-        if zs.mode_num in GAS_MODES:
+        if hvac_mode_changing:
+            # Avoid a simultaneous hvac_mode + fan_mode change in the same HA
+            # state write.  The native climate card interprets that as a user
+            # action and sends set_fan_mode("").  Preserve the current fan_mode
+            # if still valid in the new mode; otherwise default to "auto".
+            # The correct device fan_mode will sync on the next poll cycle when
+            # hvac_mode is stable.
+            fan_str = self._attr_fan_mode if self._attr_fan_mode in self._attr_fan_modes else "auto"
+        elif zs.mode_num in GAS_MODES:
             fan_str = "auto"
         elif ha_mode_str == "fan_only":
             raw = {0: "off", 1: "low", 2: "high"}.get(zs.fan_only_speed, "off")
