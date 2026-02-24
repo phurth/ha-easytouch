@@ -174,7 +174,9 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
 
     @property
     def data_healthy(self) -> bool:
-        if not self._authenticated or self._last_data_time == 0.0:
+        # Don't check _authenticated — it's False between sessions by design.
+        # Only check that we've received data recently.
+        if self._last_data_time == 0.0:
             return False
         return (time.monotonic() - self._last_data_time) < 15.0
 
