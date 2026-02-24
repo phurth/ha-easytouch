@@ -392,11 +392,13 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
             self._client = None
 
     async def _do_connect(self) -> None:
+        last_exc: Exception = BleakError("no attempts made")
         for attempt in range(1, 4):
             try:
                 await self._try_connect(attempt)
                 return
             except Exception as exc:
+                last_exc = exc
                 _LOGGER.warning("Connect attempt %d/3 failed: %s", attempt, exc)
                 if self._client:
                     try:
@@ -408,7 +410,7 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
                 self._authenticated = False
                 if attempt < 3:
                     await asyncio.sleep(3 * attempt)
-        raise BleakError(f"All connection attempts to {self.address} failed")
+        raise BleakError(f"All connection attempts to {self.address} failed: {last_exc}") from last_exc
 
     async def _try_connect(self, attempt: int) -> None:
         _LOGGER.info("Connecting to EasyTouch %s (attempt %d)", self.address, attempt)
@@ -586,6 +588,14 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
         except asyncio.CancelledError:
             pass
         except Exception as exc:
+            exc_str = str(exc).lower()
+            if "already shutdown" in exc_str or "not started" in exc_str:
+                # BT stack not yet ready (common during HA startup) — retry quickly,
+                # no penalty to failure counter.
+                _LOGGER.debug("BT stack not ready — retrying in 5s")
+                self._session_task = None
+                self._schedule_next_session(5.0)
+                return
             self._consecutive_failures += 1
             backoff = min(
                 RECONNECT_BACKOFF_BASE_S * (2 ** min(self._consecutive_failures, 10)),
