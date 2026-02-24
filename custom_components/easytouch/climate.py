@@ -29,6 +29,8 @@ from .const import (
     DEVICE_TO_HA_MODE,
     DOMAIN,
     GAS_MODES,
+    HA_TO_DEVICE_DEFAULT,
+    HEAT_TYPE_PRESETS,
     HEAT_TYPE_REVERSE,
     TEMP_STEP,
 )
@@ -262,13 +264,57 @@ class EasyTouchClimate(CoordinatorEntity[EasyTouchCoordinator], ClimateEntity):
             action = HVACAction.IDLE
         self._attr_hvac_action = action
 
+    # ── Optimistic state helper ────────────────────────────────────────────────
+
+    def _optimistic_apply_mode(self, hvac_mode: HVACMode, mode_num: int) -> None:
+        """Optimistically update entity attributes for an HVAC mode / mode_num transition.
+
+        Called before sending a command so the UI reflects the new state immediately
+        rather than bouncing back to the old state during the status-suppression window.
+        """
+        ha_str = hvac_mode.value
+        self._attr_hvac_mode = hvac_mode
+        self._attr_hvac_action = HVACAction.OFF if hvac_mode == HVACMode.OFF else HVACAction.IDLE
+
+        # Fan modes for the new mode_num
+        avail_fan = self.coordinator.get_available_fan_modes(self.zone, mode_num)
+        self._attr_fan_modes = avail_fan if avail_fan else ["auto"]
+        # For gas modes the fan is autonomous; otherwise keep current mode if still valid
+        if mode_num in GAS_MODES or not self._attr_fan_modes:
+            self._attr_fan_mode = "auto"
+        elif self._attr_fan_mode not in self._attr_fan_modes:
+            self._attr_fan_mode = self._attr_fan_modes[0]
+
+        # Preset mode
+        presets = self.coordinator.get_available_presets(self.zone)
+        if presets and ha_str in ("heat", "auto"):
+            self._attr_preset_mode = HEAT_TYPE_REVERSE.get(mode_num, presets[0])
+        else:
+            self._attr_preset_mode = None
+
     # ── Service handlers ──────────────────────────────────────────────────────
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        ha_str = hvac_mode.value  # e.g. "off", "cool"
+        ha_str = hvac_mode.value
+        # Mirror coordinator's mode_num selection so fan_modes are correct immediately
+        mode_num = HA_TO_DEVICE_DEFAULT.get(ha_str, 0)
+        if ha_str == "heat":
+            presets = self.coordinator.get_available_presets(self.zone)
+            if presets:
+                first_mode = HEAT_TYPE_PRESETS.get(presets[0])
+                if first_mode is not None:
+                    mode_num = first_mode
+        self._optimistic_apply_mode(hvac_mode, mode_num)
+        self.async_write_ha_state()
         await self.coordinator.async_set_hvac_mode(self.zone, ha_str)
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
+        mode_num = HEAT_TYPE_PRESETS.get(preset_mode)
+        if mode_num is None:
+            return
+        self._optimistic_apply_mode(HVACMode.HEAT, mode_num)
+        self._attr_preset_mode = preset_mode  # ensure exact string is used
+        self.async_write_ha_state()
         await self.coordinator.async_set_preset_mode(self.zone, preset_mode)
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
@@ -277,6 +323,15 @@ class EasyTouchClimate(CoordinatorEntity[EasyTouchCoordinator], ClimateEntity):
         temp_low = kwargs.get("target_temp_low")
         state = self.coordinator.thermostat_state
         mode_num = state.zones[self.zone].mode_num if state else 0
+
+        # Optimistic update
+        if temp_high is not None:
+            self._attr_target_temperature_high = float(temp_high)
+        if temp_low is not None:
+            self._attr_target_temperature_low = float(temp_low)
+        if temp is not None:
+            self._attr_target_temperature = float(temp)
+        self.async_write_ha_state()
 
         if temp_high is not None:
             self.coordinator.schedule_debounce(
@@ -295,8 +350,14 @@ class EasyTouchClimate(CoordinatorEntity[EasyTouchCoordinator], ClimateEntity):
             )
 
     async def async_set_fan_mode(self, fan_mode: str) -> None:
+        if not fan_mode:
+            _LOGGER.debug("Ignoring empty fan_mode request")
+            return
         state = self.coordinator.thermostat_state
         mode_num = state.zones[self.zone].mode_num if state else 0
+        # Optimistic update
+        self._attr_fan_mode = fan_mode
+        self.async_write_ha_state()
         self.coordinator.schedule_debounce(
             f"fan_{self.zone}",
             lambda fm=fan_mode, mn=mode_num: self.coordinator.async_set_fan_mode(
