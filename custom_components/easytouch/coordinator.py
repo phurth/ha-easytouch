@@ -149,12 +149,16 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
 
         # Signals
         self._config_done_event = asyncio.Event()   # set when all zone configs received
+        self._config_task: asyncio.Task | None = None
         self._poll_task: asyncio.Task | None = None
         self._reconnect_task: asyncio.Task | None = None
         self._consecutive_failures: int = 0
         self._last_data_time: float = 0.0
         # Track when auth last succeeded to detect expected post-auth disconnect
         self._last_auth_time: float = 0.0
+        # Some devices intentionally disconnect immediately after password write.
+        # In that case, the next connection is the operational session.
+        self._awaiting_post_auth_reconnect: bool = False
 
     # ──────────────────────────────────────────────────────────────────────────
     # Public helpers
@@ -330,16 +334,17 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
     # ──────────────────────────────────────────────────────────────────────────
 
     async def _send_change(self, changes: dict) -> None:
-        payload = json.dumps({"Type": "Change", "Changes": changes})
+        # Compact JSON (no spaces) matches Android JSONObject.toString() output
+        payload = json.dumps({"Type": "Change", "Changes": changes}, separators=(',', ':'))
         await self._write_json(payload)
 
     async def _write_json(self, payload: str, attempt: int = 0) -> None:
         if not self._client or not self._connected:
             _LOGGER.warning("Cannot write JSON: not connected")
             return
-        # No delay on first attempt — device expects prompt follow-up after auth.
+        # 100ms first-attempt delay matches Android's writeJsonCommand initial delay.
         # Retry attempts use increasing delays for reliability.
-        delays = [0.0, 0.2, 0.4]
+        delays = [0.1, 0.2, 0.4]
         await asyncio.sleep(delays[attempt] if attempt < len(delays) else 0.4)
         try:
             data = payload.encode("utf-8")
@@ -353,11 +358,15 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
                 _LOGGER.warning("JSON write failed after 3 attempts: %s", exc)
 
     async def _request_config(self, zone: int) -> None:
-        payload = json.dumps({"Type": "Get Config", "Zone": zone})
+        # Compact JSON matches Android JSONObject.toString()
+        payload = json.dumps({"Type": "Get Config", "Zone": zone}, separators=(',', ':'))
         await self._write_json(payload)
 
     async def _request_status(self) -> None:
-        payload = json.dumps({"Type": "Get Status", "Zone": 0, "EM": "x", "TM": 0})
+        payload = json.dumps(
+            {"Type": "Get Status", "Zone": 0, "EM": "x", "TM": 0},
+            separators=(',', ':'),
+        )
         await self._write_json(payload)
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -372,9 +381,11 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
 
     async def async_disconnect(self) -> None:
         self._stop_poll()
+        self._stop_config_discovery()
         self._cancel_reconnect()
         self._connected = False
         self._authenticated = False
+        self._awaiting_post_auth_reconnect = False
         if self._client:
             try:
                 await self._client.disconnect()
@@ -415,7 +426,16 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
             self.address,
             disconnected_callback=self._on_disconnect,
         )
-        await self._finish_connect(client)
+        # Timeout prevents _finish_connect from hanging if any GATT step stalls
+        try:
+            await asyncio.wait_for(self._finish_connect(client), timeout=25.0)
+        except asyncio.TimeoutError:
+            _LOGGER.warning("_finish_connect timed out for %s", self.address)
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            raise BleakError(f"Post-connect setup timed out for {self.address}")
 
     async def _finish_connect(self, client: BleakClient) -> None:
         self._client = client
@@ -432,6 +452,21 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
 
         # Try reading Device Information Service
         await self._read_device_info(client)
+
+        # If we just completed the auth-leg reconnect, proceed directly to config/status.
+        if self._awaiting_post_auth_reconnect:
+            _LOGGER.info(
+                "Post-auth reconnect established for %s; starting operational session",
+                self.address,
+            )
+            self._awaiting_post_auth_reconnect = False
+            # _last_auth_time intentionally NOT reset — keeps post-auth window open
+            # so that EE01-triggered disconnects during config discovery are also
+            # detected as post-auth and re-assert _awaiting_post_auth_reconnect.
+            self._authenticated = True
+            self._consecutive_failures = 0
+            self._start_config_discovery()
+            return
 
         # Authenticate: write password bytes to DD01
         await asyncio.sleep(AUTH_STEP_DELAY_S)
@@ -469,16 +504,22 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
             _LOGGER.debug("Could not read Device Information Service: %s", exc)
 
     async def _authenticate(self, client: BleakClient) -> None:
-        """Write password bytes to DD01; success = GATT_SUCCESS = authenticated."""
+        """Write password bytes to DD01; GATT_SUCCESS = authenticated.
+
+        Immediately fires config discovery (matching Android's onCharacteristicWrite
+        → requestConfig(0) flow). _awaiting_post_auth_reconnect stays True until the
+        poll loop starts, so any disconnect during config discovery is treated as a
+        post-auth disconnect and triggers a quick skip-password reconnect.
+        """
         try:
             pw_bytes = self._password.encode("utf-8")
             await client.write_gatt_char(PASSWORD_CHAR_UUID, pw_bytes, response=True)
-            _LOGGER.info("Password write succeeded — authenticated")
+            _LOGGER.info("Password write succeeded — starting config discovery")
             self._authenticated = True
+            self._awaiting_post_auth_reconnect = True
             self._last_auth_time = time.monotonic()
             self._consecutive_failures = 0
-            # Discover zone configs, then start polling
-            self.hass.async_create_task(self._config_discovery())
+            self._start_config_discovery()
         except BleakError as exc:
             _LOGGER.error("Password write failed: %s", exc)
             raise
@@ -495,8 +536,8 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
                 _LOGGER.debug("Disconnected during config discovery at zone %d", zone)
                 return
             await self._request_config(zone)
-            # Read response explicitly (matching Android's readJsonResponse after writeJsonCommand)
-            await asyncio.sleep(READ_RESPONSE_DELAY_S)
+            # Read response after 50ms — matches Android's READ_DELAY_MS = 50
+            await asyncio.sleep(0.05)
             if self._client and self._connected:
                 try:
                     data = await asyncio.wait_for(
@@ -516,11 +557,25 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
         self._config_done_event.set()
         self._start_poll()
 
+    def _start_config_discovery(self) -> None:
+        if self._config_task and not self._config_task.done():
+            return
+        self._config_done_event.clear()
+        self._config_task = self.hass.async_create_task(self._config_discovery())
+
+    def _stop_config_discovery(self) -> None:
+        if self._config_task and not self._config_task.done():
+            self._config_task.cancel()
+        self._config_task = None
+
     # ──────────────────────────────────────────────────────────────────────────
     # Poll loop
     # ──────────────────────────────────────────────────────────────────────────
 
     def _start_poll(self) -> None:
+        # Auth/config cycle complete — clear the post-auth reconnect flag
+        self._awaiting_post_auth_reconnect = False
+        self._last_auth_time = 0.0
         self._stop_poll()
         self._poll_task = self.hass.async_create_task(self._poll_loop())
         _LOGGER.info("Poll loop started (%.0fs interval)", POLL_INTERVAL_S)
@@ -748,12 +803,14 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
                 "EasyTouch %s post-auth disconnect (%.3fs after auth) — reconnecting quickly",
                 self.address, time_since_auth,
             )
-            # Reset so a second post-auth disconnect uses normal backoff
-            self._last_auth_time = 0.0
+            # Re-assert flag so next connect skips password and retries config
+            self._awaiting_post_auth_reconnect = True
         else:
             _LOGGER.warning("EasyTouch %s disconnected", self.address)
+            self._awaiting_post_auth_reconnect = False
 
         self._stop_poll()
+        self._stop_config_discovery()
         self._connected = False
         self._authenticated = False
         self._config_done_event.clear()
