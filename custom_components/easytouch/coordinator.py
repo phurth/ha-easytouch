@@ -351,7 +351,7 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
         try:
             data = payload.encode("utf-8")
             await self._client.write_gatt_char(JSON_CMD_UUID, data, response=True)
-            _LOGGER.info("JSON write OK: %.100s", payload)
+            _LOGGER.debug("JSON write OK: %.100s", payload)
         except BleakError as exc:
             _LOGGER.warning("JSON write failed: %s", exc)
             raise
@@ -415,7 +415,7 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
         raise BleakError(f"All connection attempts to {self.address} failed: {last_exc}") from last_exc
 
     async def _try_connect(self, attempt: int) -> None:
-        _LOGGER.info("Connecting to EasyTouch %s (attempt %d)", self.address, attempt)
+        _LOGGER.debug("Connecting to EasyTouch %s (attempt %d)", self.address, attempt)
         device = bluetooth.async_ble_device_from_address(
             self.hass, self.address, connectable=True
         )
@@ -442,7 +442,7 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
     async def _finish_connect(self, client: BleakClient) -> None:
         self._client = client
         self._connected = True
-        _LOGGER.info("Connected to EasyTouch %s", self.address)
+        _LOGGER.debug("Connected to EasyTouch %s", self.address)
         await asyncio.sleep(AUTH_STEP_DELAY_S)
         await self._read_device_info(client)
         await asyncio.sleep(AUTH_STEP_DELAY_S)
@@ -489,7 +489,7 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
         try:
             pw_bytes = self._password.encode("utf-8")
             await client.write_gatt_char(PASSWORD_CHAR_UUID, pw_bytes, response=True)
-            _LOGGER.info("Password write succeeded")
+            _LOGGER.debug("Password write succeeded")
             self._authenticated = True
             self._consecutive_failures = 0
         except BleakError as exc:
@@ -519,7 +519,7 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
                     if data:
                         raw = data.decode("utf-8", errors="replace").strip()
                         if raw:
-                            _LOGGER.info("FF01: %.200s", raw)
+                            _LOGGER.debug("FF01: %.200s", raw)
                             self._accumulate(raw)
                 except (BleakError, asyncio.TimeoutError) as exc:
                     _LOGGER.debug("FF01 read failed: %s", exc)
@@ -537,7 +537,7 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
             if self._client and self._connected:
                 if not self._config_done:
                     zone = self._next_config_zone
-                    _LOGGER.info("Get Config zone %d", zone)
+                    _LOGGER.debug("Get Config zone %d", zone)
                     try:
                         await self._request_config(zone)
                         self._next_config_zone += 1
