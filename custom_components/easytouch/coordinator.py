@@ -37,7 +37,6 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
     AUTH_STEP_DELAY_S,
-    CONFIG_ZONE_DELAY_S,
     CONF_PASSWORD,
     DEBOUNCE_DELAY_S,
     DEFAULT_MAX_TEMP,
@@ -80,8 +79,6 @@ from .const import (
     MODE_HEAT,
     PASSWORD_CHAR_UUID,
     POLL_INTERVAL_S,
-    READ_RESPONSE_DELAY_S,
-    READ_RETRY_DELAY_S,
     RECONNECT_BACKOFF_BASE_S,
     RECONNECT_BACKOFF_CAP_S,
     SERIAL_NUMBER_UUID,
@@ -89,7 +86,6 @@ from .const import (
     FLAG_CYCLE_ACTIVE,
     FLAG_IS_COOLING,
     FLAG_IS_HEATING,
-    STALE_TIMEOUT_S,
     STATUS_SUPPRESS_S,
 )
 from .models import ThermostatState, ZoneConfig, ZoneState
@@ -155,16 +151,12 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
 
         # Signals
         self._config_done_event = asyncio.Event()   # set when all zone configs received
-        self._config_task: asyncio.Task | None = None
-        self._poll_task: asyncio.Task | None = None
-        self._reconnect_task: asyncio.Task | None = None
+        self._session_task: asyncio.Task | None = None  # next scheduled session
         self._consecutive_failures: int = 0
         self._last_data_time: float = 0.0
-        # Config-discovery state: tracks progress across the reconnect-per-command cycle.
-        # The device disconnects after each EE01 write; FF01 retains the response value
-        # so we read it on the NEXT connection (after re-auth) before writing the next command.
+        # Config-discovery state
         self._next_config_zone: int = 0   # next zone index to request (0-3)
-        self._config_done: bool = False   # True once all zone configs have been gathered
+        self._config_done: bool = False   # True once all zone configs gathered
 
     # ──────────────────────────────────────────────────────────────────────────
     # Public helpers
@@ -344,24 +336,19 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
         payload = json.dumps({"Type": "Change", "Changes": changes}, separators=(',', ':'))
         await self._write_json(payload)
 
-    async def _write_json(self, payload: str, attempt: int = 0) -> None:
+    async def _write_json(self, payload: str) -> None:
+        # Write immediately after auth — device timer fires at ~133ms after password write,
+        # so any delay risks missing the window. manos/ha-micro-air-easytouch uses 0ms
+        # initial delay and adaptive backoff only after failures (which starts at 0).
         if not self._client or not self._connected:
-            _LOGGER.warning("Cannot write JSON: not connected")
-            return
-        # 100ms first-attempt delay matches Android's writeJsonCommand initial delay.
-        # Retry attempts use increasing delays for reliability.
-        delays = [0.1, 0.2, 0.4]
-        await asyncio.sleep(delays[attempt] if attempt < len(delays) else 0.4)
+            raise BleakError("Cannot write JSON: not connected")
         try:
             data = payload.encode("utf-8")
             await self._client.write_gatt_char(JSON_CMD_UUID, data, response=True)
-            _LOGGER.info("JSON write OK (attempt %d): %.100s", attempt + 1, payload)
+            _LOGGER.info("JSON write OK: %.100s", payload)
         except BleakError as exc:
-            if attempt < 2:
-                _LOGGER.debug("JSON write failed (attempt %d): %s — retrying", attempt + 1, exc)
-                await self._write_json(payload, attempt + 1)
-            else:
-                _LOGGER.warning("JSON write failed after 3 attempts: %s", exc)
+            _LOGGER.warning("JSON write failed: %s", exc)
+            raise
 
     async def _request_config(self, zone: int) -> None:
         # Compact JSON matches Android JSONObject.toString()
@@ -386,9 +373,9 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
             await self._do_connect()
 
     async def async_disconnect(self) -> None:
-        self._stop_poll()
-        self._stop_config_discovery()
-        self._cancel_reconnect()
+        if self._session_task and not self._session_task.done():
+            self._session_task.cancel()
+        self._session_task = None
         self._connected = False
         self._authenticated = False
         self._config_done = False
@@ -448,21 +435,13 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
         self._client = client
         self._connected = True
         _LOGGER.info("Connected to EasyTouch %s", self.address)
-
-        # Brief settle before any GATT operations
         await asyncio.sleep(AUTH_STEP_DELAY_S)
-
-        # EasyTouch uses read-after-write pattern on FF01 (not notify).
-        # The characteristic does not have a CCCD descriptor; sending a CCCD
-        # write via start_notify causes the device to drop the connection.
-
-        # Try reading Device Information Service (fast: returns if 0x180A absent)
         await self._read_device_info(client)
-
-        # Always authenticate on every connection — the device disconnects after each
-        # EE01 command (by design), so every reconnect needs a fresh password write.
         await asyncio.sleep(AUTH_STEP_DELAY_S)
         await self._authenticate(client)
+        # Schedule one session: read FF01 from prev write, write next command, disconnect.
+        # Runs as a background task so _finish_connect (and the connect lock) returns first.
+        self.hass.async_create_task(self._run_session())
 
     async def _read_device_info(self, client: BleakClient) -> None:
         """Read BLE 0x180A Device Information Service if present."""
@@ -496,14 +475,7 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
             _LOGGER.debug("Could not read Device Information Service: %s", exc)
 
     async def _authenticate(self, client: BleakClient) -> None:
-        """Write password bytes to DD01; GATT_SUCCESS = authenticated.
-
-        After each EE01 write the device disconnects (by design). FF01 retains the
-        response value across connections. So every reconnect re-authenticates and then:
-          - If config is done: starts the poll loop (Get Status every 4s).
-          - If config is in progress: reads the pending FF01 response from the last
-            EE01 write, then sends the next zone's Get Config.
-        """
+        """Write password bytes to DD01 to authenticate."""
         try:
             pw_bytes = self._password.encode("utf-8")
             await client.write_gatt_char(PASSWORD_CHAR_UUID, pw_bytes, response=True)
@@ -514,129 +486,108 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
             _LOGGER.error("Password write failed: %s", exc)
             raise
 
-        if self._config_done:
-            self._start_poll()
-        else:
-            self._start_config_discovery()
-
     # ──────────────────────────────────────────────────────────────────────────
-    # Config discovery (zones 0-3)
+    # BLE session (manos pattern: read FF01 → write command → explicit disconnect)
     # ──────────────────────────────────────────────────────────────────────────
 
-    async def _config_discovery(self) -> None:
-        """One connection = read pending FF01 response + write next zone's Get Config.
+    async def _run_session(self) -> None:
+        """One BLE session after auth: read FF01, write command, then disconnect.
 
-        Protocol (manos/ha-micro-air-easytouch confirmed pattern):
-          The device disconnects after each EE01 write but FF01 retains the response
-          value across connections. Each reconnect (with re-auth):
-            1. Reads FF01 for the response from the PREVIOUS EE01 write.
-            2. Sends the NEXT zone's Get Config to EE01.
-            3. Device disconnects; _on_disconnect schedules a quick reconnect.
-          After all 4 zones are sent and their responses read, start polling.
+        Matches manos/ha-micro-air-easytouch exactly:
+          - FF01 retains the response from the previous EE01 write across connections.
+          - Read FF01 first (get last response), then write next command to EE01.
+          - Always explicitly disconnect in finally (device may also disconnect itself).
+          - Schedule next session after POLL_INTERVAL_S (poll) or 1s (config phase).
         """
-        # ── Step 1: Read pending FF01 response from the previous EE01 write ──
-        if self._next_config_zone > 0 and self._client and self._connected:
-            try:
-                data = await asyncio.wait_for(
-                    self._client.read_gatt_char(JSON_RET_UUID), timeout=5.0
-                )
-                if data:
-                    raw = data.decode("utf-8", errors="replace").strip()
-                    if raw:
-                        _LOGGER.info(
-                            "Config FF01 (for zone %d): %.200s",
-                            self._next_config_zone - 1, raw,
-                        )
-                        self._accumulate(raw)
-            except (BleakError, asyncio.TimeoutError) as exc:
-                _LOGGER.debug("Config FF01 read failed: %s", exc)
-
-        # ── Step 2: If all 4 zone requests sent and last response read, we're done ──
-        if self._next_config_zone >= 4:
-            _LOGGER.info(
-                "Config discovery done. Zones found: %s",
-                sorted(self.zone_configs.keys()),
-            )
-            self._config_done = True
-            self._config_done_event.set()
-            self._start_poll()
-            return
-
-        # ── Step 3: Send next zone's Get Config ──
-        if not self._connected:
-            return
-        zone = self._next_config_zone
-        _LOGGER.info("Requesting Get Config for zone %d", zone)
         try:
-            await self._request_config(zone)
-            # Write succeeded — advance zone counter so next connect reads this response
-            self._next_config_zone += 1
-        except BleakError as exc:
-            _LOGGER.debug("Get Config zone %d write failed: %s — will retry", zone, exc)
-            # Don't advance — retry same zone on next reconnect
-        # Device will disconnect after processing; _on_disconnect → quick reconnect
-
-    def _start_config_discovery(self) -> None:
-        # Each reconnect triggers a new config step (read FF01 + write next zone).
-        # Cancel any leftover task from the previous connection first.
-        if self._config_task and not self._config_task.done():
-            self._config_task.cancel()
-        self._config_task = self.hass.async_create_task(self._config_discovery())
-
-    def _stop_config_discovery(self) -> None:
-        if self._config_task and not self._config_task.done():
-            self._config_task.cancel()
-        self._config_task = None
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # Poll loop
-    # ──────────────────────────────────────────────────────────────────────────
-
-    def _start_poll(self) -> None:
-        self._stop_poll()
-        self._poll_task = self.hass.async_create_task(self._poll_loop())
-        _LOGGER.info("Poll loop started (%.0fs interval)", POLL_INTERVAL_S)
-
-    def _stop_poll(self) -> None:
-        if self._poll_task and not self._poll_task.done():
-            self._poll_task.cancel()
-            self._poll_task = None
-
-    async def _poll_loop(self) -> None:
-        """Write Get Status every 4 seconds; also do an explicit read for reliability."""
-        try:
-            while self._connected and self._authenticated:
-                # Check for stale connection
-                if (
-                    self._last_data_time > 0
-                    and (time.monotonic() - self._last_data_time) > STALE_TIMEOUT_S
-                ):
-                    _LOGGER.warning(
-                        "No data for %.0fs — connection stale, reconnecting",
-                        STALE_TIMEOUT_S,
+            # Step 1: Read FF01 — retains value from previous session's EE01 write
+            if self._client and self._connected:
+                try:
+                    data = await asyncio.wait_for(
+                        self._client.read_gatt_char(JSON_RET_UUID), timeout=5.0
                     )
-                    await self._client.disconnect()
-                    break
+                    if data:
+                        raw = data.decode("utf-8", errors="replace").strip()
+                        if raw:
+                            _LOGGER.info("FF01: %.200s", raw)
+                            self._accumulate(raw)
+                except (BleakError, asyncio.TimeoutError) as exc:
+                    _LOGGER.debug("FF01 read failed: %s", exc)
 
-                await self._request_status()
+            # Step 2: Transition to poll once all zone configs written + last response read
+            if not self._config_done and self._next_config_zone >= 4:
+                _LOGGER.info(
+                    "Config discovery done. Zones found: %s",
+                    sorted(self.zone_configs.keys()),
+                )
+                self._config_done = True
+                self._config_done_event.set()
 
-                # Give notification time to arrive; also read explicitly as fallback
-                await asyncio.sleep(READ_RESPONSE_DELAY_S)
-                if self._client and self._connected:
+            # Step 3: Write next command to EE01
+            if self._client and self._connected:
+                if not self._config_done:
+                    zone = self._next_config_zone
+                    _LOGGER.info("Get Config zone %d", zone)
                     try:
-                        data = await self._client.read_gatt_char(JSON_RET_UUID)
-                        if data:
-                            self._accumulate(data.decode("utf-8", errors="replace"))
-                    except BleakError:
-                        pass
+                        await self._request_config(zone)
+                        self._next_config_zone += 1
+                    except BleakError as exc:
+                        _LOGGER.debug("Get Config zone %d failed: %s", zone, exc)
+                else:
+                    try:
+                        await self._request_status()
+                    except BleakError as exc:
+                        _LOGGER.debug("Get Status failed: %s", exc)
 
-                # Wait the remainder of the poll interval
-                await asyncio.sleep(POLL_INTERVAL_S - READ_RESPONSE_DELAY_S)
+        finally:
+            # Always explicitly disconnect after write (manos pattern)
+            if self._client:
+                try:
+                    await self._client.disconnect()
+                except Exception:
+                    pass
+                self._client = None
+            self._connected = False
+            self._authenticated = False
+            # Schedule next session
+            delay = 1.0 if not self._config_done else POLL_INTERVAL_S
+            self._schedule_next_session(delay)
+
+    def _schedule_next_session(self, delay: float) -> None:
+        """Schedule the next connect+session after `delay` seconds."""
+        if self._session_task and not self._session_task.done():
+            return
+        _MAX_FAILURES = 20
+        if self._consecutive_failures >= _MAX_FAILURES:
+            _LOGGER.error(
+                "EasyTouch %s: giving up after %d failures. Reload integration to retry.",
+                self.address, self._consecutive_failures,
+            )
+            return
+        _LOGGER.debug("Next session in %.0fs", delay)
+        self._session_task = self.hass.async_create_task(
+            self._session_with_delay(delay)
+        )
+
+    async def _session_with_delay(self, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+            if self._connected:
+                return
+            await self.async_connect()
+            # _finish_connect schedules _run_session; reset failure counter on success
+            self._consecutive_failures = 0
         except asyncio.CancelledError:
             pass
-        except Exception:
-            _LOGGER.exception("Poll loop error")
-        _LOGGER.debug("Poll loop exited")
+        except Exception as exc:
+            self._consecutive_failures += 1
+            backoff = min(
+                RECONNECT_BACKOFF_BASE_S * (2 ** min(self._consecutive_failures, 10)),
+                RECONNECT_BACKOFF_CAP_S,
+            )
+            _LOGGER.warning("Session connect failed (%s) — retry in %.0fs", exc, backoff)
+            self._session_task = None  # allow next schedule
+            self._schedule_next_session(backoff)
 
     # ──────────────────────────────────────────────────────────────────────────
     # Notification + read data handler
@@ -810,71 +761,13 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
 
     @callback
     def _on_disconnect(self, _client: BleakClient) -> None:
-        # During config discovery the device intentionally disconnects after each EE01
-        # write (by design). Use quick reconnect so the next read-write step happens fast.
-        # During polling, unexpected disconnects use exponential backoff.
-        quick = not self._config_done
-
-        if quick:
-            _LOGGER.info("EasyTouch %s disconnected (config phase) — reconnecting quickly", self.address)
-        else:
-            _LOGGER.warning("EasyTouch %s disconnected", self.address)
-
-        self._stop_poll()
+        # Mark disconnected — _run_session.finally handles reconnect scheduling.
+        # If disconnect is unexpected (not from _run_session), the session task is
+        # already scheduled or _run_session will handle cleanup in its finally block.
+        _LOGGER.debug("EasyTouch %s disconnected", self.address)
         self._connected = False
         self._authenticated = False
-        self._config_done_event.clear()
-        self._schedule_reconnect(quick=quick)
-        # Push unavailable state
         self.async_set_updated_data(None)
-
-    def _schedule_reconnect(self, quick: bool = False) -> None:
-        if self._reconnect_task and not self._reconnect_task.done():
-            return
-        if quick:
-            delay = 1.0
-        else:
-            # After hitting the backoff cap several times, stop automatically
-            # retrying so we don't spin forever. User can reload the integration.
-            _MAX_FAILURES = 20
-            if self._consecutive_failures >= _MAX_FAILURES:
-                _LOGGER.error(
-                    "EasyTouch %s: giving up after %d failed reconnect attempts. "
-                    "Reload the integration to retry.",
-                    self.address, self._consecutive_failures,
-                )
-                return
-            delay = min(
-                RECONNECT_BACKOFF_BASE_S * (2 ** self._consecutive_failures),
-                RECONNECT_BACKOFF_CAP_S,
-            )
-            self._consecutive_failures += 1
-        _LOGGER.info(
-            "Scheduling reconnect in %.0fs (attempt %d)",
-            delay, self._consecutive_failures,
-        )
-        self._reconnect_task = self.hass.async_create_task(
-            self._reconnect_with_delay(delay)
-        )
-
-    async def _reconnect_with_delay(self, delay: float) -> None:
-        try:
-            await asyncio.sleep(delay)
-            if self._connected:
-                return
-            _LOGGER.info("Reconnecting to %s...", self.address)
-            await self.async_connect()
-            self._consecutive_failures = 0
-        except asyncio.CancelledError:
-            pass
-        except Exception as exc:
-            _LOGGER.warning("Reconnect failed: %s", exc)
-            self._schedule_reconnect()
-
-    def _cancel_reconnect(self) -> None:
-        if self._reconnect_task and not self._reconnect_task.done():
-            self._reconnect_task.cancel()
-            self._reconnect_task = None
 
     # ──────────────────────────────────────────────────────────────────────────
     # DataUpdateCoordinator hook (no-op: we push via async_set_updated_data)
