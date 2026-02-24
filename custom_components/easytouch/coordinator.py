@@ -509,6 +509,9 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
           - Always explicitly disconnect in finally (device may also disconnect itself).
           - Schedule next session after POLL_INTERVAL_S (poll) or 1s (config phase).
         """
+        # Mark expected NOW — the device disconnects itself after receiving the EE01
+        # write, so _on_disconnect can fire before we reach the finally block.
+        self._expecting_disconnect = True
         try:
             # Step 1: Read FF01 — retains value from previous session's EE01 write
             if self._client and self._connected:
@@ -551,9 +554,7 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
 
         finally:
             # Always explicitly disconnect after write (manos pattern).
-            # Flag the disconnect as expected so _on_disconnect doesn't push None.
             if self._client:
-                self._expecting_disconnect = True
                 try:
                     await self._client.disconnect()
                 except Exception:
