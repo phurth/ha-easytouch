@@ -1,15 +1,21 @@
 {
   "domain": "easytouch",
   "name": "Micro-Air EasyTouch",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "config_flow": true,
   "documentation": "https://github.com/phurth/ha-easytouch",
   "issue_tracker": "https://github.com/phurth/ha-easytouch/issues",
   "dependencies": [],
-  "codeowners": ["@phurth"],
-  "requirements": ["bleak-retry-connector>=3.1.0"],
+  "codeowners": [
+    "@phurth"
+  ],
+  "requirements": [
+    "bleak-retry-connector>=3.1.0"
+  ],
   "bluetooth": [
-    {"local_name": "EasyTouch*"}
+    {
+      "local_name": "EasyTouch*"
+    }
   ],
   "iot_class": "local_polling"
 }
