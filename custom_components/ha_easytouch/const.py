@@ -1,6 +1,6 @@
 """Constants for the EasyTouch integration."""
 
-DOMAIN = "easytouch"
+DOMAIN = "ha_easytouch"
 
 CONF_ADDRESS = "address"
 CONF_NAME = "name"

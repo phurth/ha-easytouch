@@ -1,7 +1,7 @@
 {
-  "domain": "easytouch",
+  "domain": "ha_easytouch",
   "name": "Micro-Air EasyTouch",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "config_flow": true,
   "documentation": "https://github.com/phurth/ha-easytouch",
   "issue_tracker": "https://github.com/phurth/ha-easytouch/issues",
