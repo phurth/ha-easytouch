@@ -27,8 +27,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
-    # Connect in background — do not block HA startup; entities start unavailable
-    hass.async_create_task(coordinator.async_connect())
+    # Connect in background — do not block HA startup; entities start unavailable.
+    # async_start() handles connection failures by scheduling the reconnect loop,
+    # so the integration self-heals if all proxy slots are occupied at boot.
+    hass.async_create_background_task(
+        coordinator.async_start(), name="easytouch_start"
+    )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True

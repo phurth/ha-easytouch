@@ -392,6 +392,33 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
     # Connection lifecycle
     # ──────────────────────────────────────────────────────────────────────────
 
+    async def async_start(self) -> None:
+        """Start BLE connection; schedule reconnect on failure.
+
+        Call this from async_setup_entry instead of async_connect directly.
+        Unlike async_connect (which raises on failure), async_start catches
+        errors and schedules the reconnect backoff loop so the integration
+        recovers automatically — e.g. when all proxy slots are occupied at boot.
+        """
+        try:
+            await self.async_connect()
+        except Exception as exc:
+            exc_str = str(exc).lower()
+            if "already shutdown" in exc_str or "not started" in exc_str:
+                _LOGGER.debug("BT stack not ready at startup — retrying in 5s")
+                self._schedule_reconnect(5.0)
+                return
+            self._consecutive_failures += 1
+            backoff = min(
+                RECONNECT_BACKOFF_BASE_S * (2 ** min(self._consecutive_failures, 10)),
+                RECONNECT_BACKOFF_CAP_S,
+            )
+            _LOGGER.warning(
+                "EasyTouch %s initial connect failed: %s — retry in %.0fs",
+                self.address, exc, backoff,
+            )
+            self._schedule_reconnect(backoff)
+
     async def async_connect(self) -> None:
         async with self._connect_lock:
             if self._connected:
