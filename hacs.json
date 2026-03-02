@@ -2,5 +2,8 @@
   "name": "Micro-Air EasyTouch",
   "content_in_root": false,
   "render_readme": true,
-  "homeassistant": "2024.1.0"
+  "homeassistant": "2024.1.0",
+  "domains": [
+    "ha_easytouch"
+  ]
 }
