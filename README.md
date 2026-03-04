@@ -4,6 +4,8 @@ Home Assistant HACS integration for **Micro-Air EasyTouch** RV thermostats.
 
 Connects directly over Bluetooth Low Energy — no cloud, no MQTT bridge, no internet required.
 
+> **Disclaimer:** This is an independent community integration and is not affiliated with, endorsed by, or supported by Micro-Air or any of its affiliates. Use it at your own risk.
+
 ## Features
 
 - **Auto-discovery** via BLE advertisements (name prefix `EasyTouch*`)
