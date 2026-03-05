@@ -75,8 +75,9 @@ async def async_setup_entry(
         state = coordinator.thermostat_state
         if state is None:
             return
+        is_multizone = len(state.available_zones) > 1
         new = [
-            EasyTouchClimate(coordinator, entry, zone)
+            EasyTouchClimate(coordinator, entry, zone, is_multizone=is_multizone)
             for zone in state.available_zones
             if zone not in created_zones
         ]
@@ -105,6 +106,7 @@ class EasyTouchClimate(CoordinatorEntity[EasyTouchCoordinator], ClimateEntity):
         coordinator: EasyTouchCoordinator,
         entry: ConfigEntry,
         zone: int,
+        is_multizone: bool = False,
     ) -> None:
         super().__init__(coordinator)
         self.zone = zone
@@ -112,10 +114,12 @@ class EasyTouchClimate(CoordinatorEntity[EasyTouchCoordinator], ClimateEntity):
         address = entry.data[CONF_ADDRESS]
         mac_clean = address.replace(":", "").lower()
 
-        # Unique ID and entity name
+        # Unique ID and entity name.
+        # Single-zone: zone 0 uses _attr_name=None so HA uses the device name alone.
+        # Multi-zone: all zones get an explicit "Zone N" label so they're distinguishable.
         self._attr_unique_id = f"easytouch_{mac_clean}_zone_{zone}"
-        if zone == 0:
-            self._attr_name = None  # Use device name for single zone
+        if zone == 0 and not is_multizone:
+            self._attr_name = None  # Use device name alone for single-zone devices
         else:
             self._attr_name = f"Zone {zone + 1}"
 

@@ -598,7 +598,7 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
             # Normal shutdown (async_disconnect or reconnect cancellation)
             return
         except Exception as exc:
-            _LOGGER.warning("Poll loop ended unexpectedly: %s", exc)
+            _LOGGER.warning("Poll loop ended unexpectedly: %s (%s)", type(exc).__name__, exc)
             # Ensure disconnected state; _on_disconnect may already have fired
             if self._connected:
                 self._connected = False
@@ -627,11 +627,13 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
                 await self._do_read_response()
                 await asyncio.sleep(_INTER_CONFIG_DELAY_S)
             except (BleakError, asyncio.TimeoutError) as exc:
-                _LOGGER.warning("Get Config zone %d failed: %s — continuing", zone, exc)
+                _LOGGER.warning("Get Config zone %d failed: %s — aborting, will retry on reconnect", zone, exc)
                 raise  # abort discovery; reconnect will retry
 
+        active_zones = sorted(z for z, cfg in self.zone_configs.items() if cfg.available_modes_mask != 0)
         _LOGGER.info(
-            "Config discovery done. Zones found: %s",
+            "Config discovery done. Active zones: %s (probed: %s)",
+            active_zones,
             sorted(self.zone_configs.keys()),
         )
         self._config_done = True
