@@ -24,7 +24,9 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from bleak import BleakClient
 from bleak.exc import BleakError
@@ -168,6 +170,7 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
         # Config-discovery state
         self._next_config_zone: int = 0   # next zone index to request (0-3)
         self._config_done: bool = False   # True once all zone configs gathered
+        self._poll_count: int = 0         # counts status polls; used to throttle location sends
 
     # ──────────────────────────────────────────────────────────────────────────
     # Public helpers
@@ -368,9 +371,31 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
         payload = json.dumps({"Type": "Get Config", "Zone": zone}, separators=(',', ':'))
         await self._write_json(payload)
 
-    async def _request_status(self) -> None:
+    def _build_status_request(self, include_location: bool = False) -> dict:
+        """Build a Get Status payload.
+
+        TM (Unix timestamp) is always included. LAT/LON/DST are included only
+        when include_location=True — on first connect and once per hour — so
+        the device can display accurate local weather without redundant data
+        on every poll. Format matches Android app: LAT/LON as 5-decimal strings.
+        """
+        now_utc = datetime.now(ZoneInfo("UTC"))
+        msg: dict = {"Type": "Get Status", "Zone": 0, "TM": int(now_utc.timestamp())}
+        if include_location:
+            lat = self.hass.config.latitude
+            lon = self.hass.config.longitude
+            if lat is not None and lon is not None:
+                tz = ZoneInfo(self.hass.config.time_zone)
+                dst = datetime.now(tz).dst()
+                dst_minutes = int(dst.total_seconds() / 60) if dst else 0
+                msg["LAT"] = f"{lat:.5f}"
+                msg["LON"] = f"{lon:.5f}"
+                msg["DST"] = dst_minutes
+        return msg
+
+    async def _request_status(self, include_location: bool = False) -> None:
         payload = json.dumps(
-            {"Type": "Get Status", "Zone": 0, "EM": "x", "TM": 0},
+            self._build_status_request(include_location),
             separators=(',', ':'),
         )
         await self._write_json(payload)
@@ -564,6 +589,9 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
             else:
                 _LOGGER.debug("Skipping config discovery (already complete)")
 
+            # Send location on first poll, then once per hour.
+            location_interval = max(1, round(3600 / POLL_INTERVAL_S))
+
             # Poll loop
             while True:
                 # 1. Drain command queue — deliver all pending commands before polling status
@@ -582,14 +610,16 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
                         _LOGGER.warning("Command delivery failed: %s", exc)
                         raise  # exit loop; _on_disconnect will trigger reconnect
 
-                # 2. Status poll
+                # 2. Status poll — include location on first poll and once per hour
+                include_loc = (self._poll_count % location_interval) == 0
                 try:
-                    await self._request_status()
+                    await self._request_status(include_loc)
                     await asyncio.sleep(_POST_WRITE_READ_DELAY_S)
                     await self._do_read_response()
                 except (BleakError, asyncio.TimeoutError) as exc:
                     _LOGGER.warning("Status poll failed: %s", exc)
                     raise
+                self._poll_count += 1
 
                 # 3. Sleep until next poll
                 await asyncio.sleep(POLL_INTERVAL_S)
