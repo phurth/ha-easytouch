@@ -589,6 +589,8 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
             else:
                 _LOGGER.debug("Skipping config discovery (already complete)")
 
+            # Reset on every (re)connect so the first poll always includes location.
+            self._poll_count = 0
             # Send location on first poll, then once per hour.
             location_interval = max(1, round(3600 / POLL_INTERVAL_S))
 
