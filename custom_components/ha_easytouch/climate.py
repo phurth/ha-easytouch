@@ -24,14 +24,12 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
+    AUTO_MODES,
     DEFAULT_MAX_TEMP,
     DEFAULT_MIN_TEMP,
     DEVICE_TO_HA_MODE,
     DOMAIN,
     GAS_MODES,
-    HA_TO_DEVICE_DEFAULT,
-    HEAT_TYPE_PRESETS,
-    HEAT_TYPE_REVERSE,
     TEMP_STEP,
 )
 from .coordinator import EasyTouchCoordinator
@@ -258,12 +256,9 @@ class EasyTouchClimate(CoordinatorEntity[EasyTouchCoordinator], ClimateEntity):
         self._attr_fan_mode = fan_str
 
         # Preset mode (heat source selection)
-        presets = self.coordinator.get_available_presets(self.zone)
-        self._attr_preset_modes = presets if presets else None
-        if presets and ha_mode_str in ("heat", "auto"):
-            self._attr_preset_mode = HEAT_TYPE_REVERSE.get(zs.mode_num, presets[0])
-        else:
-            self._attr_preset_mode = None
+        self._attr_preset_modes, self._attr_preset_mode = self._presets_for_mode(
+            ha_mode_str, zs.mode_num
+        )
 
         # HVAC action
         if not system_power or ha_mode_str == "off":
@@ -277,6 +272,25 @@ class EasyTouchClimate(CoordinatorEntity[EasyTouchCoordinator], ClimateEntity):
         else:
             action = HVACAction.IDLE
         self._attr_hvac_action = action
+
+    def _presets_for_mode(
+        self, ha_mode_str: str, mode_num: int
+    ) -> tuple[list[str] | None, str | None]:
+        """Return (preset_modes, preset_mode) for a device mode.
+
+        Presets are heat sources.  They apply to plain heat modes and to the Auto
+        variants alike, so in auto the list is restricted to the heat sources the
+        device offers an Auto variant for, and the current Auto variant maps back
+        to its heat source for display.
+        """
+        is_auto = ha_mode_str == "auto"
+        presets = self.coordinator.get_available_presets(self.zone, for_auto=is_auto)
+        if not presets:
+            return None, None
+        if ha_mode_str not in ("heat", "auto"):
+            return presets, None
+        name = self.coordinator.get_preset_name(self.zone, mode_num)
+        return presets, name if name in presets else presets[0]
 
     # ── Optimistic state helper ────────────────────────────────────────────────
 
@@ -300,33 +314,28 @@ class EasyTouchClimate(CoordinatorEntity[EasyTouchCoordinator], ClimateEntity):
             self._attr_fan_mode = self._attr_fan_modes[0]
 
         # Preset mode
-        presets = self.coordinator.get_available_presets(self.zone)
-        if presets and ha_str in ("heat", "auto"):
-            self._attr_preset_mode = HEAT_TYPE_REVERSE.get(mode_num, presets[0])
-        else:
-            self._attr_preset_mode = None
+        self._attr_preset_modes, self._attr_preset_mode = self._presets_for_mode(
+            ha_str, mode_num
+        )
 
     # ── Service handlers ──────────────────────────────────────────────────────
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         ha_str = hvac_mode.value
-        # Mirror coordinator's mode_num selection so fan_modes are correct immediately
-        mode_num = HA_TO_DEVICE_DEFAULT.get(ha_str, 0)
-        if ha_str == "heat":
-            presets = self.coordinator.get_available_presets(self.zone)
-            if presets:
-                first_mode = HEAT_TYPE_PRESETS.get(presets[0])
-                if first_mode is not None:
-                    mode_num = first_mode
+        # Mirror the coordinator's mode_num selection so fan modes and the preset
+        # are correct immediately, before the first status poll comes back.
+        mode_num = self.coordinator.resolve_mode_num(self.zone, ha_str)
         self._optimistic_apply_mode(hvac_mode, mode_num)
         self.async_write_ha_state()
         await self.coordinator.async_set_hvac_mode(self.zone, ha_str)
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
-        mode_num = HEAT_TYPE_PRESETS.get(preset_mode)
+        mode_num = self.coordinator.resolve_preset_mode_num(self.zone, preset_mode)
         if mode_num is None:
             return
-        self._optimistic_apply_mode(HVACMode.HEAT, mode_num)
+        # A preset picked while in auto selects an Auto variant, not a heat mode.
+        hvac_mode = HVACMode.AUTO if mode_num in AUTO_MODES else HVACMode.HEAT
+        self._optimistic_apply_mode(hvac_mode, mode_num)
         self._attr_preset_mode = preset_mode  # ensure exact string is used
         self.async_write_ha_state()
         await self.coordinator.async_set_preset_mode(self.zone, preset_mode)

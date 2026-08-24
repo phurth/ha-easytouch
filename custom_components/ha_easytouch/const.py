@@ -39,6 +39,42 @@ MODE_GAS_HEAT = 13      # Gas heat (gas fan)
 # Furnace / gas modes whose fan is autonomous (always "auto" in HA)
 GAS_MODES: frozenset[int] = frozenset({MODE_HEAT, MODE_FURNACE, MODE_GAS_HEAT})
 
+# Auto (heat/cool changeover) modes.  The device has one Auto variant per heat
+# source; the plain MODE_AUTO has no heat source bound to it.  Furnace units do
+# not even advertise it in MAV, yet they still ACK a Change to it and then never
+# call for heat or cool.  The working variants are the ones the thermostat screen
+# labels "Auto Furnace" etc., so always resolve Auto against MAV.
+AUTO_MODES: frozenset[int] = frozenset(
+    {MODE_AUTO, MODE_AUTO_HS, MODE_AUTO_HP, MODE_AUTO_FURNACE}
+)
+
+# Heat-source mode → the Auto variant driven by that heat source
+HEAT_MODE_TO_AUTO_MODE: dict[int, int] = {
+    MODE_HEAT: MODE_AUTO,
+    MODE_FURNACE: MODE_AUTO_FURNACE,
+    MODE_GAS_HEAT: MODE_AUTO_FURNACE,
+    MODE_HEAT_PUMP: MODE_AUTO_HP,
+    MODE_HEAT_STRIP: MODE_AUTO_HS,
+    MODE_ELECTRIC_HEAT: MODE_AUTO_HS,
+}
+
+# Auto variant → the heat source it uses (for preset display)
+AUTO_MODE_TO_HEAT_MODE: dict[int, int] = {
+    MODE_AUTO: MODE_HEAT,
+    MODE_AUTO_FURNACE: MODE_FURNACE,
+    MODE_AUTO_HP: MODE_HEAT_PUMP,
+    MODE_AUTO_HS: MODE_HEAT_STRIP,
+}
+
+# Fallback order when a zone advertises several Auto variants and there is no
+# heat-source hint.  A variant with a real heat source beats the plain Auto.
+AUTO_MODE_PREFERENCE: tuple[int, ...] = (
+    MODE_AUTO_FURNACE,
+    MODE_AUTO_HP,
+    MODE_AUTO_HS,
+    MODE_AUTO,
+)
+
 # ── HA mode mappings ──────────────────────────────────────────────────────────
 DEVICE_TO_HA_MODE: dict[int, str] = {
     MODE_OFF: "off",

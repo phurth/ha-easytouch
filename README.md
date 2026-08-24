@@ -11,6 +11,7 @@ Connects directly over Bluetooth Low Energy — no cloud, no MQTT bridge, no int
 - **Auto-discovery** via BLE advertisements (name prefix `EasyTouch*`)
 - **Multi-zone support**: up to 4 zones, discovered automatically
 - **Heat-source preset modes**: Heat Pump, Furnace, Heat Strip, Electric Heat, Gas Heat — only sources the device actually supports are shown
+- **Auto (heat/cool changeover)** selects the heat-source-specific Auto mode the thermostat actually acts on (the same "Auto Furnace" / "Auto Heat Pump" the device screen offers), and the preset switches between them
 - **Dynamic fan modes**: fan options change automatically based on current HVAC mode (furnace/gas modes lock to `auto`)
 - **4-second polling** matching the official EasyTouch app for fast UI response
 - **500 ms debounce** on temperature and fan changes to avoid command flooding
@@ -98,7 +99,10 @@ Connects directly over Bluetooth Low Energy — no cloud, no MQTT bridge, no int
 | `heat` | Gas Heat | 13 |
 | `heat` | Heat | 3 |
 | `cool` | — | 2 |
-| `auto` | — | 8 |
+| `auto` | Furnace | 11 (Auto Furnace) |
+| `auto` | Heat Pump | 10 (Auto Heat Pump) |
+| `auto` | Heat Strip | 9 (Auto Heat Strip) |
+| `auto` | Heat | 8 (Auto, no heat source) |
 | `fan_only` | — | 1 |
 | `dry` | — | 6 |
 | `off` | — | 0 |
@@ -108,7 +112,7 @@ Connects directly over Bluetooth Low Energy — no cloud, no MQTT bridge, no int
 ```yaml
 logger:
   logs:
-    custom_components.easytouch: debug
+    custom_components.ha_easytouch: debug
 ```
 
 Use **Download diagnostics** from the integration page for a full runtime state dump.

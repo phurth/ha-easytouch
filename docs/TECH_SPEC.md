@@ -86,6 +86,8 @@ Polling and timing constants:
 Mode/fan mapping details:
 
 - Device mode constants span `0..13` (off/fan/cool/heat/furnace/heat-pump/dry/auto variants).
+- Each Auto variant is bound to a heat source (`9` heat strip, `10` heat pump, `11` furnace); plain `8` has none and is inert on units that heat with a furnace, so HA `auto` resolves to a `MAV`-advertised variant and preserves the zone's heat source across heat ⇄ auto switches.
+- Heat-source presets apply to both heat modes and Auto variants; the preset list in auto is derived from the advertised Auto variants, one entry each.
 - Gas/furnace-related heat modes constrain fan handling.
 - Fan payload values use explicit numeric mapping (`off=0`, `low=1`, `high=2`, `auto=128`).
 - JSON fan field is selected by active mode (`eleFan`, `gasFan`, `coolFan`, `autoFan`, `fanOnly`).

@@ -39,6 +39,9 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
     AUTH_STEP_DELAY_S,
+    AUTO_MODE_PREFERENCE,
+    AUTO_MODE_TO_HEAT_MODE,
+    AUTO_MODES,
     CONF_PASSWORD,
     DEBOUNCE_DELAY_S,
     DEFAULT_MAX_TEMP,
@@ -57,7 +60,9 @@ from .const import (
     HA_FAN_TO_VALUE,
     HA_TO_DEVICE_DEFAULT,
     HARDWARE_REVISION_UUID,
+    HEAT_MODE_TO_AUTO_MODE,
     HEAT_TYPE_PRESETS,
+    HEAT_TYPE_REVERSE,
     IDX_AMBIENT_TEMP,
     IDX_AUTO_COOL_SP,
     IDX_AUTO_FAN_SPEED,
@@ -78,7 +83,9 @@ from .const import (
     MODEL_NUMBER_UUID,
     MODE_FURNACE,
     MODE_GAS_HEAT,
+    MODE_AUTO,
     MODE_HEAT,
+    MODE_OFF,
     PASSWORD_CHAR_UUID,
     POLL_INTERVAL_S,
     RECONNECT_BACKOFF_BASE_S,
@@ -212,17 +219,97 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
                     seen_ha.add(ha)
         return modes
 
-    def get_available_presets(self, zone: int) -> list[str]:
-        """Return heat-source preset names available for a zone."""
+    def get_available_presets(self, zone: int, for_auto: bool = False) -> list[str]:
+        """Return heat-source preset names available for a zone.
+
+        With for_auto set, the list covers the Auto variants the device
+        advertises rather than its plain heat modes (e.g. "Furnace" → Auto
+        Furnace), one entry per variant.
+        """
         cfg = self.zone_configs.get(zone)
         if cfg is None or cfg.available_modes_mask == 0:
             return []
+        if for_auto:
+            return list(self._auto_preset_map(zone).values())
         mav = cfg.available_modes_mask
         return [
             name
             for name, mode_num in HEAT_TYPE_PRESETS.items()
             if mav & (1 << mode_num)
         ]
+
+    def _auto_preset_map(self, zone: int) -> dict[int, str]:
+        """Map each advertised Auto variant to the heat-source name shown for it.
+
+        Several heat sources share one Auto variant (gas heat and furnace both
+        run Auto Furnace), so each variant gets exactly one name: the name of a
+        heat mode the device also advertises where possible, otherwise the
+        variant's canonical heat source.
+        """
+        cfg = self.zone_configs.get(zone)
+        if cfg is None or cfg.available_modes_mask == 0:
+            return {}
+        mav = cfg.available_modes_mask
+        names: dict[int, str] = {}
+        for name, heat_mode in HEAT_TYPE_PRESETS.items():
+            auto_mode = HEAT_MODE_TO_AUTO_MODE.get(heat_mode)
+            if auto_mode is None or auto_mode in names:
+                continue
+            if mav & (1 << auto_mode) and mav & (1 << heat_mode):
+                names[auto_mode] = name
+        for auto_mode in AUTO_MODE_PREFERENCE:
+            if auto_mode in names or not mav & (1 << auto_mode):
+                continue
+            heat_mode = AUTO_MODE_TO_HEAT_MODE.get(auto_mode)
+            name = HEAT_TYPE_REVERSE.get(heat_mode) if heat_mode is not None else None
+            if name and name not in names.values():
+                names[auto_mode] = name
+        return names
+
+    def get_preset_name(self, zone: int, mode_num: int) -> str | None:
+        """Return the heat-source preset name representing a device mode."""
+        if mode_num in AUTO_MODES:
+            return self._auto_preset_map(zone).get(mode_num)
+        return HEAT_TYPE_REVERSE.get(mode_num)
+
+    def get_auto_mode(self, zone: int, preferred_heat_mode: int | None = None) -> int:
+        """Return the Auto variant this zone actually supports.
+
+        The device has a separate Auto mode per heat source (Auto Furnace, Auto
+        Heat Pump, Auto Heat Strip).  Plain MODE_AUTO has no heat source bound to
+        it: the thermostat accepts the mode and the setpoints but never calls for
+        heat or cool, so it must only be used when it is all the device offers.
+        """
+        cfg = self.zone_configs.get(zone)
+        if cfg is None or cfg.available_modes_mask == 0:
+            return MODE_AUTO
+        mav = cfg.available_modes_mask
+        candidates: list[int] = []
+        if preferred_heat_mode is not None:
+            paired = HEAT_MODE_TO_AUTO_MODE.get(preferred_heat_mode)
+            if paired is not None:
+                candidates.append(paired)
+        candidates.extend(AUTO_MODE_PREFERENCE)
+        for mode_num in candidates:
+            if mav & (1 << mode_num):
+                return mode_num
+        return MODE_AUTO
+
+    def get_heat_source_mode(self, zone: int) -> int | None:
+        """Return the zone's current heat source as a heat-mode number, if any.
+
+        Works whether the zone is in a heat mode or in an Auto variant, so the
+        heat source carries across a heat ⇄ auto switch.
+        """
+        state = self.thermostat_state
+        zs = state.zones.get(zone) if state else None
+        if zs is None:
+            return None
+        if zs.mode_num in AUTO_MODES:
+            return AUTO_MODE_TO_HEAT_MODE.get(zs.mode_num)
+        if zs.mode_num in HEAT_TYPE_REVERSE:
+            return zs.mode_num
+        return None
 
     def get_available_fan_modes(self, zone: int, mode_num: int) -> list[str]:
         """Return HA fan modes available for a zone/mode combo (from FA array)."""
@@ -254,29 +341,54 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
     # ──────────────────────────────────────────────────────────────────────────
 
     async def async_set_hvac_mode(self, zone: int, ha_mode: str) -> None:
-        """Change HVAC mode (with optional heat-preset fallback)."""
-        mode_num = HA_TO_DEVICE_DEFAULT.get(ha_mode, 0)
-        if ha_mode == "heat":
-            # Use first available heat preset if any
-            presets = self.get_available_presets(zone)
-            if presets:
-                from .const import HEAT_TYPE_PRESETS as _P
-                first_mode = _P.get(presets[0])
-                if first_mode is not None:
-                    mode_num = first_mode
+        """Change HVAC mode (resolving the device-specific heat / auto variant)."""
+        mode_num = self.resolve_mode_num(zone, ha_mode)
         power = 0 if ha_mode == "off" else 1
         await self._send_change({"zone": zone, "power": power, "mode": mode_num})
         self.suppress_status()
 
     async def async_set_preset_mode(self, zone: int, preset: str) -> None:
-        """Change heat-source preset (only valid when HVAC mode is heat)."""
-        from .const import HEAT_TYPE_PRESETS as _P
-        mode_num = _P.get(preset)
+        """Change heat source (valid in heat and auto modes)."""
+        mode_num = self.resolve_preset_mode_num(zone, preset)
         if mode_num is None:
             _LOGGER.warning("Unknown preset: %s", preset)
             return
         await self._send_change({"zone": zone, "power": 1, "mode": mode_num})
         self.suppress_status()
+
+    def resolve_mode_num(self, zone: int, ha_mode: str) -> int:
+        """Map an HA HVAC mode to the device mode number to write for this zone.
+
+        HA's generic "heat" and "auto" each cover several device modes; pick the
+        variant the zone advertises, keeping the current heat source where one
+        applies.
+        """
+        heat_source = self.get_heat_source_mode(zone)
+        if ha_mode == "auto":
+            return self.get_auto_mode(zone, heat_source)
+        if ha_mode == "heat":
+            if heat_source is not None:
+                return heat_source
+            presets = self.get_available_presets(zone)
+            if presets:
+                first_mode = HEAT_TYPE_PRESETS.get(presets[0])
+                if first_mode is not None:
+                    return first_mode
+        return HA_TO_DEVICE_DEFAULT.get(ha_mode, MODE_OFF)
+
+    def resolve_preset_mode_num(self, zone: int, preset: str) -> int | None:
+        """Map a heat-source preset to a device mode, honouring an active Auto mode."""
+        heat_mode = HEAT_TYPE_PRESETS.get(preset)
+        if heat_mode is None:
+            return None
+        state = self.thermostat_state
+        zs = state.zones.get(zone) if state else None
+        if zs is not None and zs.mode_num in AUTO_MODES:
+            for auto_mode, name in self._auto_preset_map(zone).items():
+                if name == preset:
+                    return auto_mode
+            return self.get_auto_mode(zone, heat_mode)
+        return heat_mode
 
     async def async_set_temperature(
         self,
