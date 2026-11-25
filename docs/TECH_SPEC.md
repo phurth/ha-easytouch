@@ -19,6 +19,7 @@ This document describes the HA-native implementation and excludes mobile bridge 
 - config flow discovers thermostat by BLE advertisement
 - setup stores address/password config and creates coordinator
 - startup connection is backgrounded to avoid blocking HA bootstrap
+- options flow: Bluetooth adapter choice (`adapter`: `automatic` or a scanner source; `adapter_fallback`, default on). Connects go through `ha_ble_pinning.establish_connection_via`: Automatic = Home Assistant's routing; otherwise pinned to that adapter/proxy, with the other scanners that hear the thermostat as a fallback tier when allowed (used only when the chosen one hasn't heard it or has no free slot). Changing options reloads the entry.
 
 ## 4. Runtime Lifecycle
 
@@ -108,7 +109,7 @@ Operational thresholds:
 ## 9. Diagnostics and Observability
 
 - binary sensors: connected, authenticated, data healthy
-- diagnostic sensors: serial, firmware, model, config index
+- diagnostic sensors: serial, firmware, model, config index, Bluetooth path (scanner name of the link in use, from habluetooth's connected scanner)
 - diagnostics export includes coordinator state and latest parsed data
 
 ## 10. Security and Safety Notes
@@ -126,6 +127,7 @@ Recent trajectory includes:
 - protocol sequencing/timing refinement
 - optimistic state and suppression logic tuning
 - migration to `ha_easytouch` domain naming
+- 1.1.0: user-selectable Bluetooth adapter (ha-ble-pinning), Bluetooth Path sensor; minimum Home Assistant 2025.2 (the library needs Python 3.13)
 
 ## 12. Known Constraints
 

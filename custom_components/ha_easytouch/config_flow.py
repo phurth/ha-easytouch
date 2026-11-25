@@ -9,11 +9,26 @@ import voluptuous as vol
 from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
     async_discovered_service_info,
+    async_scanner_devices_by_address,
 )
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.const import CONF_ADDRESS
+from homeassistant.core import callback
+from homeassistant.helpers.selector import (
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 
-from .const import CONF_NAME, CONF_PASSWORD, DOMAIN
+from ha_ble_pinning import AUTOMATIC, adapter_options
+
+from .const import CONF_ADAPTER, CONF_ADAPTER_FALLBACK, CONF_NAME, CONF_PASSWORD, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,6 +44,12 @@ class EasyTouchConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle config flow for EasyTouch."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        """Return the options flow (Bluetooth adapter choice)."""
+        return EasyTouchOptionsFlow()
 
     def __init__(self) -> None:
         self._discovery_info: BluetoothServiceInfoBleak | None = None
@@ -116,3 +137,45 @@ class EasyTouchConfigFlow(ConfigFlow, domain=DOMAIN):
             errors=errors,
             description_placeholders={"name": self._name or "EasyTouch"},
         )
+
+
+class EasyTouchOptionsFlow(OptionsFlow):
+    """Choose which Bluetooth adapter or proxy the thermostat connects through.
+
+    The thermostat keeps a connection open all the time, so it occupies a slot
+    on whatever adapter it uses. Home Assistant picks that adapter by signal
+    strength and its own slot count, which can pile several held connections
+    onto one adapter that can't actually carry them. Choosing here pins the
+    thermostat to one adapter or proxy (ha-ble-pinning).
+    """
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            return self.async_create_entry(data=user_input)
+
+        entry = self.config_entry
+        current = entry.options.get(CONF_ADAPTER, AUTOMATIC)
+        heard = async_scanner_devices_by_address(
+            self.hass, entry.data[CONF_ADDRESS], connectable=True
+        )
+        choices = adapter_options(heard, current)
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_ADAPTER, default=current): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=value, label=label)
+                            for value, label in choices.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    CONF_ADAPTER_FALLBACK,
+                    default=entry.options.get(CONF_ADAPTER_FALLBACK, True),
+                ): bool,
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema)

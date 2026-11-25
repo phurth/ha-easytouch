@@ -30,7 +30,7 @@ from zoneinfo import ZoneInfo
 
 from bleak import BleakClient
 from bleak.exc import BleakError
-from bleak_retry_connector import establish_connection
+from ha_ble_pinning import AUTOMATIC, connection_path, establish_connection_via
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS
@@ -42,6 +42,8 @@ from .const import (
     AUTO_MODE_PREFERENCE,
     AUTO_MODE_TO_HEAT_MODE,
     AUTO_MODES,
+    CONF_ADAPTER,
+    CONF_ADAPTER_FALLBACK,
     CONF_PASSWORD,
     DEBOUNCE_DELAY_S,
     DEFAULT_MAX_TEMP,
@@ -139,6 +141,11 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
         self._password: str = entry.data.get(CONF_PASSWORD, "")
 
         self._client: BleakClient | None = None
+        # Bluetooth adapter choice (options) and the path actually in use.
+        self.adapter_choice: str = entry.options.get(CONF_ADAPTER, AUTOMATIC)
+        self.adapter_fallback: bool = entry.options.get(CONF_ADAPTER_FALLBACK, True)
+        self.bluetooth_path: str | None = None
+        self.bluetooth_path_source: str | None = None
         self._connected = False
         self._authenticated = False
         self._connect_lock = asyncio.Lock()
@@ -609,12 +616,17 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
         if device is None:
             raise BleakError(f"EasyTouch {self.address} not found by HA Bluetooth")
 
-        client = await establish_connection(
-            BleakClient,
+        client = await establish_connection_via(
             device,
             self.address,
+            adapter=self.adapter_choice,
+            allow_fallback=self.adapter_fallback,
+            scanner_devices=bluetooth.async_scanner_devices_by_address(
+                self.hass, self.address, connectable=True
+            ),
             disconnected_callback=self._on_disconnect,
         )
+        self._note_bluetooth_path(client)
         try:
             await asyncio.wait_for(self._finish_connect(client), timeout=25.0)
         except asyncio.TimeoutError:
@@ -954,9 +966,19 @@ class EasyTouchCoordinator(DataUpdateCoordinator[ThermostatState | None]):
     # ──────────────────────────────────────────────────────────────────────────
 
     @callback
+    def _note_bluetooth_path(self, client: BleakClient) -> None:
+        """Record which adapter or proxy the link actually uses."""
+        source = connection_path(client).source
+        scanner = bluetooth.async_scanner_by_source(self.hass, source) if source else None
+        self.bluetooth_path_source = source
+        self.bluetooth_path = (scanner.name if scanner else None) or source
+        _LOGGER.debug("EasyTouch %s connected through %s", self.address, self.bluetooth_path)
+
     def _on_disconnect(self, _client: BleakClient) -> None:
         self._connected = False
         self._authenticated = False
+        self.bluetooth_path = None
+        self.bluetooth_path_source = None
         _LOGGER.debug("EasyTouch %s disconnected", self.address)
         # Cancel the poll loop (it may already be exiting due to the same error)
         if self._poll_task and not self._poll_task.done():

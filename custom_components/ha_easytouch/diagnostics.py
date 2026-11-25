@@ -54,6 +54,11 @@ async def async_get_config_entry_diagnostics(
     return {
         "address": coordinator.address,
         "connected": coordinator.connected,
+        "bluetooth": {
+            "adapter_choice": coordinator.adapter_choice,
+            "fallback": coordinator.adapter_fallback,
+            "path": coordinator.bluetooth_path,
+        },
         "authenticated": coordinator.authenticated,
         "data_healthy": coordinator.data_healthy,
         "device_info": {

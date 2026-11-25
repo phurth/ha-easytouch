@@ -1,7 +1,7 @@
 {
   "domain": "ha_easytouch",
   "name": "Micro-Air EasyTouch",
-  "version": "1.0.9",
+  "version": "1.1.0",
   "config_flow": true,
   "documentation": "https://github.com/phurth/ha-easytouch",
   "issue_tracker": "https://github.com/phurth/ha-easytouch/issues",
@@ -14,7 +14,8 @@
   ],
   "requirements": [
     "bleak>=0.21.0",
-    "bleak-retry-connector>=3.1.0"
+    "bleak-retry-connector>=3.1.0",
+    "ha-ble-pinning>=0.2.0,<1"
   ],
   "bluetooth": [
     {

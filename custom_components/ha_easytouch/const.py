@@ -6,6 +6,11 @@ CONF_ADDRESS = "address"
 CONF_NAME = "name"
 CONF_PASSWORD = "password"
 
+# Options: which Bluetooth adapter or proxy to connect through (ha-ble-pinning).
+# "automatic" leaves the choice to Home Assistant.
+CONF_ADAPTER = "adapter"
+CONF_ADAPTER_FALLBACK = "adapter_fallback"
+
 # ── BLE UUIDs ────────────────────────────────────────────────────────────────
 SERVICE_UUID = "000000ff-0000-1000-8000-00805f9b34fb"
 PASSWORD_CHAR_UUID = "0000dd01-0000-1000-8000-00805f9b34fb"

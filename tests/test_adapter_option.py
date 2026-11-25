@@ -1,0 +1,94 @@
+"""Bluetooth adapter choice: options flow and the pinned connect."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+from homeassistant.data_entry_flow import FlowResultType
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+from custom_components.ha_easytouch.const import CONF_ADAPTER, CONF_ADAPTER_FALLBACK, DOMAIN
+from custom_components.ha_easytouch.coordinator import EasyTouchCoordinator
+
+ADDRESS = "AA:BB:CC:DD:EE:01"
+HCI0 = "11:11:11:11:11:11"
+PROXY = "33:33:33:33:33:33"
+
+
+def _heard(source, name, rssi):
+    return SimpleNamespace(
+        scanner=SimpleNamespace(source=source, name=name),
+        advertisement=SimpleNamespace(rssi=rssi),
+    )
+
+
+def _entry(options=None):
+    return MockConfigEntry(
+        domain=DOMAIN,
+        unique_id=ADDRESS,
+        data={"address": ADDRESS, "name": "EasyTouch 1", "password": ""},
+        options=options or {},
+    )
+
+
+async def test_options_flow_lists_adapters_and_saves_the_choice(hass) -> None:
+    entry = _entry()
+    entry.add_to_hass(hass)
+    heard = [_heard(HCI0, f"hci0 ({HCI0})", -70), _heard(PROXY, f"proxy ({PROXY})", -50)]
+
+    with patch(
+        "custom_components.ha_easytouch.config_flow.async_scanner_devices_by_address",
+        return_value=heard,
+    ):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    assert result["type"] is FlowResultType.FORM
+    selector = result["data_schema"].schema[next(k for k in result["data_schema"].schema if k == CONF_ADAPTER)]
+    values = [o["value"] for o in selector.config["options"]]
+    assert values == ["automatic", PROXY, HCI0]
+
+    with patch("custom_components.ha_easytouch.async_setup_entry", return_value=True):
+        result = await hass.config_entries.options.async_configure(
+            result["flow_id"], {CONF_ADAPTER: HCI0, CONF_ADAPTER_FALLBACK: False}
+        )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options == {CONF_ADAPTER: HCI0, CONF_ADAPTER_FALLBACK: False}
+
+
+async def _connect(hass, options):
+    entry = _entry(options)
+    entry.add_to_hass(hass)
+    coordinator = EasyTouchCoordinator(hass, entry)
+    coordinator._finish_connect = AsyncMock()
+    client = SimpleNamespace(_connected_scanner=SimpleNamespace(source=PROXY), _backend=None)
+    heard = [_heard(HCI0, "hci0", -70), _heard(PROXY, "proxy", -50)]
+    via = AsyncMock(return_value=client)
+    with patch("custom_components.ha_easytouch.coordinator.bluetooth") as bt, \
+         patch("custom_components.ha_easytouch.coordinator.establish_connection_via", via):
+        bt.async_ble_device_from_address.return_value = object()
+        bt.async_scanner_devices_by_address.return_value = heard
+        bt.async_scanner_by_source.return_value = SimpleNamespace(name=f"proxy ({PROXY})")
+        await coordinator._try_connect(1)
+    return coordinator, via.await_args.kwargs, heard
+
+
+async def test_default_is_automatic(hass) -> None:
+    coordinator, kwargs, _ = await _connect(hass, {})
+    assert kwargs["adapter"] == "automatic" and kwargs["allow_fallback"] is True
+    assert coordinator.bluetooth_path == f"proxy ({PROXY})"
+    assert coordinator.bluetooth_path_source == PROXY
+
+
+async def test_connect_uses_the_stored_choice(hass) -> None:
+    _, kwargs, heard = await _connect(hass, {CONF_ADAPTER: HCI0, CONF_ADAPTER_FALLBACK: False})
+    assert kwargs["adapter"] == HCI0
+    assert kwargs["allow_fallback"] is False
+    assert kwargs["scanner_devices"] == heard
+
+
+async def test_disconnect_clears_the_path(hass) -> None:
+    coordinator, _, _ = await _connect(hass, {})
+    coordinator._schedule_reconnect = lambda delay: None
+    coordinator._on_disconnect(None)
+    assert coordinator.bluetooth_path is None and coordinator.bluetooth_path_source is None

@@ -20,6 +20,7 @@ from .coordinator import EasyTouchCoordinator
 @dataclass(frozen=True, kw_only=True)
 class EasyTouchSensorDescription(SensorEntityDescription):
     value_fn: callable = lambda coordinator: None
+    attrs_fn: callable | None = None
 
 
 SENSOR_DESCRIPTIONS: tuple[EasyTouchSensorDescription, ...] = (
@@ -63,6 +64,19 @@ SENSOR_DESCRIPTIONS: tuple[EasyTouchSensorDescription, ...] = (
         icon="mdi:cog",
         value_fn=lambda c: c.config_index,
     ),
+    EasyTouchSensorDescription(
+        key="bluetooth_path",
+        translation_key="bluetooth_path",
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=True,
+        icon="mdi:bluetooth-connect",
+        value_fn=lambda c: c.bluetooth_path,
+        attrs_fn=lambda c: {
+            "source": c.bluetooth_path_source,
+            "adapter_choice": c.adapter_choice,
+            "fallback": c.adapter_fallback,
+        },
+    ),
 )
 
 
@@ -103,3 +117,9 @@ class EasyTouchSensor(CoordinatorEntity[EasyTouchCoordinator], SensorEntity):
     @property
     def native_value(self) -> Any:
         return self._description.value_fn(self.coordinator)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        if self._description.attrs_fn is None:
+            return None
+        return self._description.attrs_fn(self.coordinator)

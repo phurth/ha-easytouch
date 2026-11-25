@@ -39,11 +39,12 @@ Connects directly over Bluetooth Low Energy — no cloud, no MQTT bridge, no int
 | Model Number | Sensor (diag) | Derived model (first 3 chars of serial) |
 | Device Type | Sensor (diag) | TT field from status |
 | Config Index | Sensor (diag) | CI field from status |
+| Bluetooth Path | Sensor (diag) | The adapter or proxy the connection uses; attributes `source`, `adapter_choice`, `fallback` |
 | Reboot | Button (config) | Reboot thermostat firmware |
 
 ## Requirements
 
-- Home Assistant 2024.1+ with Bluetooth integration
+- Home Assistant 2025.2+ with Bluetooth integration
 - Bluetooth adapter on the HA host (or ESPHome BT proxy)
 - Micro-Air EasyTouch thermostat within BLE range
 
@@ -60,6 +61,17 @@ Connects directly over Bluetooth Low Energy — no cloud, no MQTT bridge, no int
 |-------|-------------|
 | Bluetooth MAC | Auto-populated from BLE advertisement |
 | Password | Leave blank if the thermostat has no password set |
+
+### Bluetooth adapter (options)
+
+The thermostat keeps its Bluetooth connection open all the time, so it holds a connection slot on whichever adapter or proxy it uses. Home Assistant picks that by signal strength and its own slot count. With several devices that hold connections (more thermostats, a power monitor, a battery monitor), it can put more on one adapter than that adapter can actually carry. Connections then drop or never come up.
+
+Settings → Devices & services → Micro-Air EasyTouch → **Configure** lets you choose:
+
+- **Connect through:** *Automatic* (the default: Home Assistant decides) or one specific adapter or proxy. The list shows the ones that currently hear the thermostat, strongest first.
+- **Use another adapter if this one is unavailable:** on by default. Another adapter is only used when the chosen one hasn't heard the thermostat recently or has no free slot.
+
+The **Bluetooth Path** sensor shows which one is in use. The choice is made with [ha-ble-pinning](https://github.com/phurth/ha-ble-pinning).
 
 ## Protocol
 
