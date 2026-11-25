@@ -19,12 +19,21 @@ _LOGGER = logging.getLogger(__name__)
 try:
     from ha_ble_pinning import (
         AUTOMATIC,
-        adapter_options,
         connection_path,
         establish_connection_via,
     )
+    from ha_ble_pinning import adapter_options as _adapter_options
 
     PINNING_READY = True
+
+    def adapter_options(
+        scanner_devices: Iterable[Any], current: str | None = None, scanners: Iterable[Any] = ()
+    ) -> dict[str, str]:
+        """Picker choices; 0.2.0 (loaded earlier in this run) lacks ``scanners``."""
+        try:
+            return _adapter_options(scanner_devices, current, scanners=scanners)
+        except TypeError:
+            return _adapter_options(scanner_devices, current)
 except ImportError:  # An older ha-ble-pinning is loaded; a restart fixes it.
     PINNING_READY = False
     AUTOMATIC = "automatic"
@@ -38,7 +47,9 @@ except ImportError:  # An older ha-ble-pinning is loaded; a restart fixes it.
             scanner = getattr(client, "_connected_scanner", None)
             return type("Path", (), {"source": getattr(scanner, "source", None)})()
 
-    def adapter_options(scanner_devices: Iterable[Any], current: str | None = None) -> dict[str, str]:
+    def adapter_options(
+        scanner_devices: Iterable[Any], current: str | None = None, scanners: Iterable[Any] = ()
+    ) -> dict[str, str]:
         """Only Automatic (plus the stored choice) until Home Assistant restarts."""
         options = {AUTOMATIC: "Automatic (restart Home Assistant to choose an adapter)"}
         if current and current != AUTOMATIC:

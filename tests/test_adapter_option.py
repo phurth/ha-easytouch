@@ -40,13 +40,18 @@ async def test_options_flow_lists_adapters_and_saves_the_choice(hass) -> None:
     with patch(
         "custom_components.ha_easytouch.config_flow.async_scanner_devices_by_address",
         return_value=heard,
+    ), patch(
+        "custom_components.ha_easytouch.config_flow.bluetooth.async_current_scanners",
+        return_value=[SimpleNamespace(source="44:44:44:44:44:44", name="hci1", connectable=True)],
+        create=True,
     ):
         result = await hass.config_entries.options.async_init(entry.entry_id)
 
     assert result["type"] is FlowResultType.FORM
     selector = result["data_schema"].schema[next(k for k in result["data_schema"].schema if k == CONF_ADAPTER)]
     values = [o["value"] for o in selector.config["options"]]
-    assert values == ["automatic", PROXY, HCI0]
+    # Heard scanners first (strongest first), then other known scanners.
+    assert values == ["automatic", PROXY, HCI0, "44:44:44:44:44:44"]
 
     with patch("custom_components.ha_easytouch.async_setup_entry", return_value=True):
         result = await hass.config_entries.options.async_configure(

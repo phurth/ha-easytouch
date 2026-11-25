@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 import voluptuous as vol
+from homeassistant.components import bluetooth
 from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
     async_discovered_service_info,
@@ -160,7 +161,12 @@ class EasyTouchOptionsFlow(OptionsFlow):
         heard = async_scanner_devices_by_address(
             self.hass, entry.data[CONF_ADDRESS], connectable=True
         )
-        choices = adapter_options(heard, current)
+        # A connected thermostat stops advertising, so also list every scanner
+        # Home Assistant knows, not only the ones hearing it right now.
+        current_scanners = getattr(bluetooth, "async_current_scanners", None)
+        choices = adapter_options(
+            heard, current, scanners=current_scanners(self.hass) if current_scanners else ()
+        )
         schema = vol.Schema(
             {
                 vol.Required(CONF_ADAPTER, default=current): SelectSelector(
