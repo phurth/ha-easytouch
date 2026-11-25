@@ -92,3 +92,29 @@ async def test_disconnect_clears_the_path(hass) -> None:
     coordinator._schedule_reconnect = lambda delay: None
     coordinator._on_disconnect(None)
     assert coordinator.bluetooth_path is None and coordinator.bluetooth_path_source is None
+
+
+async def test_loads_with_an_older_library_copy(hass, monkeypatch, caplog) -> None:
+    """An older ha-ble-pinning loaded earlier in the run must not stop the integration."""
+    import importlib  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+    import types  # noqa: PLC0415
+
+    old = types.ModuleType("ha_ble_pinning")
+    old.connection_path = lambda client: SimpleNamespace(source=None)  # 0.1.0 API only
+    monkeypatch.setitem(sys.modules, "ha_ble_pinning", old)
+    import custom_components.ha_easytouch.pinning as pinning  # noqa: PLC0415
+
+    pinning = importlib.reload(pinning)
+    try:
+        assert pinning.PINNING_READY is False
+        assert list(pinning.adapter_options([], current=HCI0)) == ["automatic", HCI0]
+        plain = AsyncMock(return_value="client")
+        with patch("bleak_retry_connector.establish_connection", plain):
+            client = await pinning.establish_connection_via(object(), ADDRESS, adapter=HCI0)
+        assert client == "client"
+        assert "Restart Home Assistant once" in caplog.text
+    finally:
+        monkeypatch.undo()
+        importlib.reload(pinning)
+    assert pinning.PINNING_READY is True

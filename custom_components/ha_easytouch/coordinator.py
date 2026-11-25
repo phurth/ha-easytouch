@@ -30,7 +30,7 @@ from zoneinfo import ZoneInfo
 
 from bleak import BleakClient
 from bleak.exc import BleakError
-from ha_ble_pinning import AUTOMATIC, connection_path, establish_connection_via
+from .pinning import AUTOMATIC, connection_path, establish_connection_via
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS

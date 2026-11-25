@@ -26,7 +26,7 @@ from homeassistant.helpers.selector import (
     SelectSelectorMode,
 )
 
-from ha_ble_pinning import AUTOMATIC, adapter_options
+from .pinning import AUTOMATIC, adapter_options
 
 from .const import CONF_ADAPTER, CONF_ADAPTER_FALLBACK, CONF_NAME, CONF_PASSWORD, DOMAIN
 
